@@ -5,17 +5,19 @@
 """ghrah-bootloader 命令面（distro/install/config/boot/stop/runtime/doctor）。
 
 纯性硬约束：本模块及其 import 图**零 ``ghrah.*``、零第三方运行时依赖**
-（仅 stdlib）。提供骨架与 distro/list、stop、doctor 基础实现；
-install / boot / runtime 的完整引导链路在后续批次补齐。
+（仅 stdlib）。提供 distro/list、boot、stop、doctor 实现；
+TODO：install / runtime 的完整引导链路。
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 
 from ghrah_bootloader import __version__
+from ghrah_bootloader.boot import resolve_boot_target, run_boot
 from ghrah_bootloader.errors import BootloaderError
 from ghrah_bootloader.layout import (
     BootToml,
@@ -49,6 +51,26 @@ def _cmd_distro_list(args: argparse.Namespace) -> int:
         except (OSError, RuntimeError):
             current = "-"
         print(f"{distro:<16} {marker or '-':<8} {', '.join(versions) or '-'} (current: {current})")
+    return 0
+
+
+def _cmd_boot(args: argparse.Namespace) -> int:
+    """引导：解析目标 → spawn OS（+ 前端）→ 健康检查 → 监督运行至停止。"""
+    target = resolve_boot_target(args.distro, args.version)
+    return asyncio.run(
+        run_boot(
+            target,
+            no_webui=args.no_webui,
+            no_browser=args.no_browser,
+        )
+    )
+
+
+def _cmd_stop(args: argparse.Namespace) -> int:
+    """停止：向运行中的 boot 会话转发停止信号（按端口探测定位）。"""
+    del args
+    # v1：boot 以前台进程运行，Ctrl-C 即停止；TODO：守护化/按端口停止。
+    print("boot 以前台运行：在 boot 终端按 Ctrl-C（或 SIGTERM）即可逆序停止。")
     return 0
 
 
@@ -86,6 +108,18 @@ def _build_parser() -> argparse.ArgumentParser:
     distro_sub = distro.add_subparsers(dest="subcommand")
     distro_list = distro_sub.add_parser("list", help="列出发行版与版本")
     distro_list.set_defaults(func=_cmd_distro_list)
+
+    boot = subparsers.add_parser(
+        "boot", aliases=["start", "webui"], help="引导发行版（spawn OS + 前端子进程）"
+    )
+    boot.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
+    boot.add_argument("--version", help="期望版本（须与 current 一致；切换走 install/update）")
+    boot.add_argument("--no-webui", action="store_true", help="不启动前端子进程")
+    boot.add_argument("--no-browser", action="store_true", help="不打开浏览器")
+    boot.set_defaults(func=_cmd_boot)
+
+    stop = subparsers.add_parser("stop", help="停止运行中的引导栈")
+    stop.set_defaults(func=_cmd_stop)
 
     doctor = subparsers.add_parser("doctor", help="诊断安装域布局与配置")
     doctor.set_defaults(func=_cmd_doctor)

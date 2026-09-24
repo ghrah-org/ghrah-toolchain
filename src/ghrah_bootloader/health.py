@@ -2,8 +2,7 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""健康检查：stdlib ``urllib.request`` 轮询 HTTP JSON 健康端点。
-"""
+"""健康检查：stdlib ``urllib.request`` 轮询 HTTP JSON 健康端点。"""
 
 from __future__ import annotations
 
