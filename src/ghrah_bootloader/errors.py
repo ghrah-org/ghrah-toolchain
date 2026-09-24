@@ -25,3 +25,7 @@ class LayoutError(BootloaderError):
 
 class SnapshotError(BootloaderError):
     """数据盘快照拍取/滚动/恢复失败。"""
+
+
+class AdoptError(BootloaderError):
+    """旧数据认领失败（守卫拒绝或移动中断已回搬）。"""

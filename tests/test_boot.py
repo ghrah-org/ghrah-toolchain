@@ -346,6 +346,9 @@ def _make_last_good(root: Path, version: str = "2026.09") -> None:
 def _make_fake_snapshot(root: Path) -> Path:
     snap = root / "generic" / "snapshots" / "20260924T000000-v2026.09→v2026.10"
     (snap / "data").mkdir(parents=True)
+    (snap / "META.toml").write_text(
+        'old_version = "2026.09"\nnew_version = "2026.10"\n', encoding="utf-8"
+    )
     return snap
 
 

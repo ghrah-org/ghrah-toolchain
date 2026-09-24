@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import signal
@@ -39,18 +40,24 @@ from ghrah_bootloader.layout import (
     ghrah_root,
     resolve_data_root,
 )
-from ghrah_bootloader.lifecycle import DEFAULT_HOST, BootStack, StackConfig
-from ghrah_bootloader.runtime_ref import acquire_distro_lock, repoint_current
+from ghrah_bootloader.lifecycle import DEFAULT_HOST, BootStack, StackConfig, port_in_use
+from ghrah_bootloader.runtime_ref import (
+    _pid_alive,
+    acquire_distro_lock,
+    repoint_current,
+)
 
 # 数据面路径助手自 layout 迁入；此处保留 re-export 视图（历史导入面不破坏）
 __all__ = [
     "BootTarget",
+    "boot_pid_path",
     "build_data_plane_env",
     "ensure_data_dirs",
     "os_server_command",
     "resolve_boot_target",
     "resolve_data_root",
     "run_boot",
+    "stop_boot_session",
 ]
 
 logger = logging.getLogger(__name__)
@@ -61,6 +68,41 @@ _ENV_SERVER_PORT = "GHRAH_SUBJECT_SERVER_PORT"
 _WEBUI_PACKAGE_RELPATH = ("ghrah-observer-webui", "packages", "observer-web")
 _SUPERVISOR_POLL_SECONDS = 0.5
 _LAST_GOOD_REF = "last-good"
+_BOOT_PID_NAME = ".boot.pid"
+
+
+def boot_pid_path(distro_root: Path) -> Path:
+    """boot 会话 pidfile 路径。"""
+    return distro_root / _BOOT_PID_NAME
+
+
+def _write_boot_pid(distro_root: Path) -> None:
+    """写 boot pidfile；已存在且 pid 活着 → 拒绝双启（陈旧则回收）。"""
+    path = boot_pid_path(distro_root)
+    if path.exists():
+        try:
+            old = int(path.read_text(encoding="utf-8").strip() or "0")
+        except (OSError, ValueError):
+            old = 0
+        if _pid_alive(old):
+            raise BootloaderError(
+                f"已有 boot 会话在运行 (pid={old}, {path})；请先 ghrah-bootloader stop"
+            )
+        logger.warning("回收陈旧 boot pidfile: %s (pid=%s)", path, old)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+
+def _clear_boot_pid(distro_root: Path) -> None:
+    """移除 boot pidfile（仅当仍属于本进程时）。"""
+    path = boot_pid_path(distro_root)
+    try:
+        current = int(path.read_text(encoding="utf-8").strip() or "0")
+    except (FileNotFoundError, OSError, ValueError):
+        return
+    if current == os.getpid():
+        with contextlib.suppress(OSError):
+            path.unlink()
 
 
 @dataclass
@@ -246,6 +288,7 @@ async def run_boot(
             installed.append(sig)
         except (NotImplementedError, RuntimeError, ValueError):
             logger.debug("signal handler unavailable: %s", sig)
+    _write_boot_pid(target.layout.root)
     try:
         await stack.start()
         try:
@@ -267,6 +310,7 @@ async def run_boot(
                 loop.remove_signal_handler(sig)
             except (NotImplementedError, RuntimeError, ValueError):
                 logger.debug("signal handler removal failed: %s", sig)
+        _clear_boot_pid(target.layout.root)
         await asyncio.shield(stack.stop())
 
 
@@ -304,3 +348,95 @@ def _update_last_good(target: BootTarget) -> None:
     boot = BootToml.load(target.layout.root.parent)
     boot.last_good = target.label
     boot.save(target.layout.root.parent)
+
+
+def stop_boot_session(
+    distro: str,
+    *,
+    timeout: float = 15.0,
+    subject_port: int | None = None,
+    webui_port: int | None = None,
+) -> int:
+    """向运行中的 boot 会话转发 SIGTERM 并等待收束（前台 boot 的另一终端入口）。
+
+    流程：读 pidfile → pid 已死则清文件提示「未在运行」→ POSIX 校验
+    ``/proc/<pid>/cmdline`` 属于 ghrah-bootloader（防误杀）→ SIGTERM →
+    轮询 pid 退出与端口释放（超时不强杀，打印手工处置指引）。
+
+    Returns:
+        0：会话已退出且端口释放；1：未在运行（含陈旧 pidfile 清理）；2：超时。
+    """
+    import signal as _signal
+    import time as _time
+
+    root = ghrah_root()
+    distro_root = root / distro
+    pidfile = boot_pid_path(distro_root)
+    if not pidfile.is_file():
+        print(f"[{distro}] 无 boot pidfile（未在运行）")
+        return 1
+    try:
+        pid = int(pidfile.read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError) as e:
+        raise BootloaderError(f"boot pidfile 损坏: {pidfile}: {e}") from e
+    if _session_exited(pid):
+        with contextlib.suppress(OSError):
+            pidfile.unlink()
+        print(f"[{distro}] boot 会话已不在运行（清理陈旧 pidfile，pid={pid}）")
+        return 1
+    if os.name == "posix":
+        cmdline = (
+            Path(f"/proc/{pid}/cmdline")
+            .read_bytes()
+            .replace(b"\0", b" ")
+            .decode("utf-8", "replace")
+        )
+        if "ghrah-bootloader" not in cmdline and "ghrah_bootloader" not in cmdline:
+            print(
+                f"[{distro}] 拒绝：pid {pid} 的 cmdline 不属于 ghrah-bootloader（{cmdline!r}）；"
+                "请人工核查后处理"
+            )
+            return 1
+    print(f"[{distro}] 向 boot 会话 pid={pid} 发送 SIGTERM（逆序收束 webui → OS）")
+    os.kill(pid, _signal.SIGTERM)
+    deadline = _time.monotonic() + timeout
+    while not _session_exited(pid):
+        if _time.monotonic() >= deadline:
+            print(
+                f"[{distro}] 等待超时（{timeout}s）：pid {pid} 仍在；不强杀，"
+                "请人工核查（ps -fp <pid>）后处置"
+            )
+            return 2
+        _time.sleep(0.2)
+    ports_busy = _busy_ports(distro_root, subject_port, webui_port)
+    if ports_busy:
+        print(f"[{distro}] 会话已退出，但端口仍被占用: {ports_busy}（可能是残留子进程）")
+        return 2
+    print(f"[{distro}] boot 会话已停止，端口已释放")
+    return 0
+
+
+def _session_exited(pid: int) -> bool:
+    """会话是否已退出：pid 不存活，或 POSIX 下处于僵尸态（Z，未被 reap）。
+
+    僵尸态进程已执行完毕，仅待父进程 wait；对调用方语义等同已退出。
+    """
+    if not _pid_alive(pid):
+        return True
+    if os.name == "posix":
+        with contextlib.suppress(OSError):
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            # comm 可能含空格/括号，取最后一个 ')' 之后的首个字段（state）
+            state = stat.rsplit(")", 1)[1].split()[0]
+            return state == "Z"
+    return False
+
+
+def _busy_ports(distro_root: Path, subject_port: int | None, webui_port: int | None) -> list[int]:
+    """检查发行版端口占用（默认取 distro.toml）。"""
+    toml = DistroToml.load(distro_root)
+    ports = [
+        subject_port if subject_port is not None else toml.subject_port,
+        webui_port if webui_port is not None else toml.webui_port,
+    ]
+    return [p for p in ports if port_in_use("127.0.0.1", p)]

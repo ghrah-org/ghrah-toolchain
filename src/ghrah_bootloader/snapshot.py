@@ -81,11 +81,11 @@ def take(
 
 
 def list_snapshots(layout: DistroLayout, distro_toml: DistroToml) -> list[Path]:
-    """按目录名（= 时间）排序枚举快照。"""
+    """按目录名（= 时间）排序枚举快照；只认含 ``META.toml`` 的目录（stray 不算）。"""
     base = snapshots_dir(layout, distro_toml)
     if not base.is_dir():
         return []
-    return sorted(p for p in base.iterdir() if p.is_dir())
+    return sorted(p for p in base.iterdir() if p.is_dir() and (p / _META_NAME).is_file())
 
 
 def roll(layout: DistroLayout, distro_toml: DistroToml, keep: int) -> list[Path]:

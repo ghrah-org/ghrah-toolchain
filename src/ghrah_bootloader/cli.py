@@ -18,7 +18,9 @@ import os
 import sys
 
 from ghrah_bootloader import __version__
-from ghrah_bootloader.boot import resolve_boot_target, run_boot
+from ghrah_bootloader.adopt import adopt as adopt_legacy
+from ghrah_bootloader.adopt import detect_legacy
+from ghrah_bootloader.boot import resolve_boot_target, run_boot, stop_boot_session
 from ghrah_bootloader.errors import BootloaderError, RuntimeRefError
 from ghrah_bootloader.layout import (
     BootToml,
@@ -33,8 +35,6 @@ from ghrah_bootloader.runtime_ref import RefSource, RuntimeRefManager
 
 logger = logging.getLogger(__name__)
 
-_LEGACY_MARKERS = ("subject.db", "taskstore.sqlite3", "manifests", "projects")
-
 
 def _default_distro(boot: BootToml) -> str:
     if boot.default and "/" in boot.default:
@@ -43,12 +43,12 @@ def _default_distro(boot: BootToml) -> str:
 
 
 def _warn_legacy_data(root) -> None:
-    """检测顶层遗留数据 → 仅提示（D13；认领 --adopt-legacy-data 属后续批次）。"""
-    found = [m for m in _LEGACY_MARKERS if (root / m).exists()]
+    """检测顶层遗留数据 → 仅提示（认领走 ``install --adopt-legacy-data``）。"""
+    found = detect_legacy(root)
     if found:
         print(
             f"[提示] 检测到 ~/.ghrah 顶层遗留数据: {', '.join(found)}；"
-            "本次安装不会改动它们（数据认领 --adopt-legacy-data 属后续批次）"
+            "本次安装不会改动它们（认领: install --adopt-legacy-data）"
         )
 
 
@@ -139,6 +139,14 @@ def _cmd_install(args: argparse.Namespace) -> int:
         gate=_resolve_gate(args, distro_toml),
     )
     print(f"已安装并重指 current → {entry.label}（commit {entry.commit}）")
+    if args.adopt_legacy_data:
+        report = adopt_legacy(DistroLayout(root=distro_root), distro_toml, subject_port=None)
+        if not report.noop:
+            print(
+                f"认领完成：数据面 {len(report.adopted)} 项 → 数据盘；"
+                f"归档 {len(report.archived)} 项 → {report.legacy_dir}"
+            )
+            print("备份保留在 legacy/…/backup/，确认系统正常后可手动删除 legacy/ 目录")
     return 0
 
 
@@ -233,11 +241,12 @@ def _cmd_boot(args: argparse.Namespace) -> int:
 
 
 def _cmd_stop(args: argparse.Namespace) -> int:
-    """停止：向运行中的 boot 会话转发停止信号（按端口探测定位）。"""
-    del args
-    # v1：boot 以前台进程运行，Ctrl-C 即停止；TODO：守护化/按端口停止。
-    print("boot 以前台运行：在 boot 终端按 Ctrl-C（或 SIGTERM）即可逆序停止。")
-    return 0
+    """停止：向运行中的 boot 会话转发 SIGTERM（pidfile 定位 + cmdline 护栏）。"""
+    boot = BootToml.load()
+    distro = args.distro or _default_distro(boot)
+    if not distro:
+        raise BootloaderError("未指定发行版：提供 --distro 或在 boot.toml 设置 default")
+    return stop_boot_session(distro)
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -301,6 +310,11 @@ def _build_parser() -> argparse.ArgumentParser:
     install.add_argument("--ref", help="签出源（latest | branch:<n> | commit:<sha>）")
     install.add_argument("--gate", help="门禁级别（basic | full | data）")
     install.add_argument("--repo", help="运行时仓路径（覆盖 env 与 distro.toml）")
+    install.add_argument(
+        "--adopt-legacy-data",
+        action="store_true",
+        help="认领 ~/.ghrah 顶层遗留数据（一次性：移动五项进数据盘，其余归档 legacy/）",
+    )
     install.set_defaults(func=_cmd_install)
 
     runtime = subparsers.add_parser("runtime", help="引导菜单管理（status/update）")
@@ -335,6 +349,7 @@ def _build_parser() -> argparse.ArgumentParser:
     boot.set_defaults(func=_cmd_boot)
 
     stop = subparsers.add_parser("stop", help="停止运行中的引导栈")
+    stop.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
     stop.set_defaults(func=_cmd_stop)
 
     doctor = subparsers.add_parser("doctor", help="诊断安装域布局与配置")

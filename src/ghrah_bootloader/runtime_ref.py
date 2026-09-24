@@ -532,15 +532,22 @@ class RuntimeRefManager:
         fp_path.parent.mkdir(parents=True, exist_ok=True)
         fp_path.write_text(fingerprint + "\n", encoding="utf-8")
         py = layout.venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        # 断言导入路径源头含 current 段：__file__ 会被 realpath 解析成 versions/<ver>/...，
+        # 故校验 sys.path 中的字面 current 段（.pth 未被 editable 工件遮蔽）。
+        code = (
+            "import sys, ghrah.core; "
+            "hits = [p for p in sys.path if 'current' in p and 'ghrah-core' in p]; "
+            "print('OK' if hits and ghrah.core.__file__ in "
+            "{p + '/ghrah/core/__init__.py' for p in hits} else 'BAD')"
+        )
         cp = self._run(
-            [str(py), "-c", "import ghrah.core; print(ghrah.core.__file__)"],
+            [str(py), "-c", code],
             cwd=tree,
             check=False,
         )
-        expected = str(layout.current)
-        if cp.returncode != 0 or expected not in cp.stdout:
+        if cp.returncode != 0 or cp.stdout.strip() != "OK":
             raise RuntimeRefError(
-                "自管 .pth 断言失败：import ghrah.core 未落在 current/ 段"
+                "自管 .pth 断言失败：ghrah.core 导入未经 current 段"
                 f"（stdout={cp.stdout.strip()!r}）"
             )
 

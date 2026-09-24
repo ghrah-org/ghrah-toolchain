@@ -148,6 +148,25 @@ def test_restore_requires_meta(home: Path) -> None:
         restore(layout, toml, snap)
 
 
+def test_list_snapshots_ignores_stray_dirs(home: Path) -> None:
+    _seed_data(home)
+    layout, toml = _layout(home), DistroToml()
+    take(
+        layout,
+        toml,
+        old_entry=_entry("1"),
+        new_entry=_entry("2"),
+        source="latest",
+        gate="basic",
+    )
+    stray = snapshots_dir(layout, toml) / "zz-stray-no-meta"
+    stray.mkdir(parents=True)
+    (stray / "junk").write_text("junk", encoding="utf-8")
+    snaps = list_snapshots(layout, toml)
+    assert snaps == [s for s in snaps if (s / "META.toml").is_file()]
+    assert stray not in snaps
+
+
 def test_snapshots_follow_external_data_root(home: Path, tmp_path: Path) -> None:
     layout = _layout(home)
     toml = DistroToml(data_root=str(tmp_path / "ext" / "data"))

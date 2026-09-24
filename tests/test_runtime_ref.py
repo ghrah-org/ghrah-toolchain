@@ -489,8 +489,8 @@ def test_sync_writes_managed_pth_and_cleans_editable(
     def fake_run(cmd, cwd=None, env=None, check=True):
         cmds.append([str(c) for c in cmd])
         stdout = ""
-        if any("import ghrah.core" in part for part in cmd):
-            stdout = str(home / "generic" / "current" / "ghrah-core" / "src" / "ghrah" / "core")
+        if any("ghrah.core" in part and "sys.path" in part for part in cmd):
+            stdout = "OK"
         return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(mgr, "_run", fake_run)
