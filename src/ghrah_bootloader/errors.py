@@ -21,3 +21,7 @@ class GateError(BootloaderError):
 
 class LayoutError(BootloaderError):
     """~/.ghrah 安装域布局读写错误。"""
+
+
+class SnapshotError(BootloaderError):
+    """数据盘快照拍取/滚动/恢复失败。"""

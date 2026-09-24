@@ -30,7 +30,7 @@ from ghrah_bootloader.boot import (
     resolve_data_root,
     run_boot,
 )
-from ghrah_bootloader.layout import DistroLayout, DistroToml
+from ghrah_bootloader.layout import BootToml, DistroLayout, DistroToml
 
 
 def _free_port() -> int:
@@ -309,3 +309,160 @@ async def _wait_dump(dump: Path, timeout: float = 15.0) -> None:
         if asyncio.get_event_loop().time() > deadline:
             raise TimeoutError(f"env dump not written: {dump}")
         await asyncio.sleep(0.2)
+
+
+# ── 救援与 known-good（批次 4） ──────────────────────────────
+
+
+def _add_version(root: Path, version: str) -> Path:
+    tree = root / "generic" / "versions" / version
+    tree.mkdir(parents=True, exist_ok=True)
+    return tree
+
+
+class _StubProc:
+    @staticmethod
+    def poll():
+        return None
+
+
+class _StubStack:
+    """不 spawn 真实子进程的 BootStack 替身（start 即就绪、OS 永不退出）。"""
+
+    def __init__(self, config, **kwargs):
+        self.os_process = _StubProc()
+
+    async def start(self):
+        return None
+
+    async def stop(self):
+        return None
+
+
+def _make_last_good(root: Path, version: str = "2026.09") -> None:
+    (root / "generic" / "last-good").symlink_to(root / "generic" / "versions" / version)
+
+
+def _make_fake_snapshot(root: Path) -> Path:
+    snap = root / "generic" / "snapshots" / "20260924T000000-v2026.09→v2026.10"
+    (snap / "data").mkdir(parents=True)
+    return snap
+
+
+def test_resolve_boot_target_ref_last_good_symlink(tmp_path: Path) -> None:
+    """--ref last-good：目标取 last-good 符号链接，跳过 --version 一致性校验。"""
+    from ghrah_bootloader.errors import BootloaderError
+
+    _make_distro(tmp_path)
+    _add_version(tmp_path, "2026.10")
+    (tmp_path / "generic" / "last-good").symlink_to(tmp_path / "generic" / "versions" / "2026.10")
+    target = resolve_boot_target("generic", "2026.09", root=tmp_path, ref="last-good")
+    assert target.version == "2026.10"
+    assert target.tree == (tmp_path / "generic" / "versions" / "2026.10").resolve()
+    with pytest.raises(BootloaderError, match="仅接受 last-good"):
+        resolve_boot_target("generic", None, root=tmp_path, ref="branch:main")
+
+
+def test_resolve_boot_target_ref_last_good_falls_back_to_toml(tmp_path: Path) -> None:
+    """last-good 符号链接缺失 → 回退 boot.toml.last_good。"""
+
+    _make_distro(tmp_path)
+    _add_version(tmp_path, "2026.10")
+    (tmp_path / "boot.toml").write_text(
+        'default = "generic/2026.09"\nlast_good = "generic/2026.10"\n', encoding="utf-8"
+    )
+    target = resolve_boot_target("generic", None, root=tmp_path, ref="last-good")
+    assert target.version == "2026.10"
+
+
+def test_resolve_boot_target_ref_last_good_missing(tmp_path: Path) -> None:
+    from ghrah_bootloader.errors import BootloaderError
+
+    _make_distro(tmp_path)
+    with pytest.raises(BootloaderError, match="last-good 未设置"):
+        resolve_boot_target("generic", None, root=tmp_path, ref="last-good")
+
+
+async def test_run_boot_restore_snapshot_with_yes(
+    distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--restore-snapshot --yes：恢复最近快照 → 重指 current → 启动（跳过确认）。"""
+    import ghrah_bootloader.boot as boot_mod
+
+    root, _ = distro_with_mock_os
+    _make_last_good(root)
+    snap = _make_fake_snapshot(root)
+    restored: list[Path] = []
+    monkeypatch.setattr(
+        boot_mod.snapshot,
+        "restore",
+        lambda layout_, toml, snap_: restored.append(snap_) or "2026.09",
+    )
+    repointed: list[tuple[str, str]] = []
+    real_repoint = boot_mod.repoint_current
+    monkeypatch.setattr(
+        boot_mod,
+        "repoint_current",
+        lambda distro_root, ver: (
+            repointed.append((str(distro_root), ver)) or real_repoint(distro_root, ver)
+        ),
+    )
+    monkeypatch.setattr(boot_mod, "BootStack", _StubStack)
+    target = resolve_boot_target("generic", None, root=root, ref="last-good")
+    stop = asyncio.Event()
+    stop.set()
+    code = await run_boot(target, no_webui=True, restore_snapshot=True, yes=True, stop_event=stop)
+    assert code == 0
+    assert restored == [snap]
+    assert repointed == [(str(root / "generic"), "2026.09")]
+
+
+async def test_run_boot_restore_snapshot_confirm_declined(
+    distro_with_mock_os, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """交互二次确认拒绝 → 中止恢复并报错。"""
+
+    root, _ = distro_with_mock_os
+    _make_last_good(root)
+    _make_fake_snapshot(root)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    target = resolve_boot_target("generic", None, root=root, ref="last-good")
+    from ghrah_bootloader.errors import BootloaderError
+
+    with pytest.raises(BootloaderError, match="已取消"):
+        await run_boot(target, no_webui=True, restore_snapshot=True, stop_event=asyncio.Event())
+
+
+async def test_run_boot_restore_snapshot_requires_yes_when_non_tty(
+    distro_with_mock_os, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非交互 stdin 未给 --yes → 拒绝恢复。"""
+
+    root, _ = distro_with_mock_os
+    _make_last_good(root)
+    _make_fake_snapshot(root)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
+    target = resolve_boot_target("generic", None, root=root, ref="last-good")
+    from ghrah_bootloader.errors import BootloaderError
+
+    with pytest.raises(BootloaderError, match="--yes"):
+        await run_boot(target, no_webui=True, restore_snapshot=True, stop_event=asyncio.Event())
+
+
+async def test_run_boot_updates_last_good_after_start(
+    distro_with_mock_os, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """健康检查通过后更新 last-good 符号链接 + boot.toml.last_good（失败仅告警）。"""
+    import ghrah_bootloader.boot as boot_mod
+
+    root, layout = distro_with_mock_os
+    monkeypatch.setattr(boot_mod, "BootStack", _StubStack)
+    target = resolve_boot_target("generic", None, root=root)
+    stop = asyncio.Event()
+    stop.set()
+    code = await run_boot(target, no_webui=True, stop_event=stop)
+    assert code == 0
+    assert layout.last_good.is_symlink()
+    assert layout.last_good.resolve().name == "2026.09"
+    assert BootToml.load(root).last_good == "generic/2026.09"

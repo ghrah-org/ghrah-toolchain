@@ -2,7 +2,7 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""~/.ghrah 布局读写、toml 解析、缺省读容忍、.pth 自管测试"""
+"""~/.ghrah 布局读写、toml 解析、缺省读容忍、.pth 自管、配置写入底座测试"""
 
 from __future__ import annotations
 
@@ -17,7 +17,9 @@ from ghrah_bootloader.layout import (
     ghrah_root,
     list_distros,
     managed_pth_path,
+    render_distro_toml,
     resolve_distro_root,
+    snapshots_dir,
     verify_managed_pth,
     write_managed_pth,
 )
@@ -229,3 +231,82 @@ def test_managed_pth_contains_current_segment(tmp_path: Path) -> None:
         assert line.endswith("/src")
     # 不允许出现 versions/<ver> 绝对路径（setuptools editable 的漂移形态）
     assert all("versions" not in line for line in lines)
+
+
+# ── 配置写入底座（批次 2/3/6） ───────────────────────────────
+
+
+def test_boot_toml_save_roundtrip_and_atomic(home: Path) -> None:
+    """save → load 往返一致；原子写（不留 tmp 残件）。"""
+    boot = BootToml(
+        default="generic/2026.09", fallback="generic/2026.08", last_good="generic/2026.09"
+    )
+    boot.save()
+    loaded = BootToml.load()
+    assert loaded == boot
+    assert (home / "boot.toml").is_file()
+    leftovers = [p.name for p in home.iterdir() if p.name.startswith(".boot.toml.tmp")]
+    assert leftovers == []
+
+
+def test_boot_toml_save_partial_keys(home: Path) -> None:
+    """None 键不落盘；往返保持 None（缺省读容忍）。"""
+    BootToml(default="generic/2026.09").save()
+    loaded = BootToml.load()
+    assert loaded.default == "generic/2026.09"
+    assert loaded.fallback is None
+    assert loaded.last_good is None
+
+
+def test_boot_toml_save_escapes_values(home: Path) -> None:
+    BootToml(default='weird"\\name/1.0').save()
+    assert BootToml.load().default == 'weird"\\name/1.0'
+
+
+def test_render_distro_toml_readback(home: Path) -> None:
+    rendered = render_distro_toml(
+        name="generic",
+        repo_path="/repo/path",
+        source="branch:main",
+        gate="basic",
+        subject_port=4112,
+        webui_port=5173,
+        data_root="",
+        snapshot_keep=3,
+    )
+    distro_dir = home / "generic"
+    distro_dir.mkdir(parents=True)
+    (distro_dir / "distro.toml").write_text(rendered, encoding="utf-8")
+    d = DistroToml.load(distro_dir)
+    assert d.name == "generic"
+    assert d.repo_path == "/repo/path"
+    assert d.ref_source == "branch:main"
+    assert d.ref_gate == "basic"
+    assert d.ref_fetch_on_update is False
+    assert d.subject_port == 4112
+    assert d.webui_port == 5173
+    assert d.data_root == ""
+    assert d.snapshot_keep == 3
+
+
+def test_distro_toml_parse_fetch_on_update(home: Path) -> None:
+    distro_dir = home / "generic"
+    distro_dir.mkdir(parents=True)
+    (distro_dir / "distro.toml").write_text(
+        """
+[distro.ref]
+source = "latest"
+gate = "basic"
+fetch_on_update = true
+""",
+        encoding="utf-8",
+    )
+    assert DistroToml.load(distro_dir).ref_fetch_on_update is True
+
+
+def test_snapshots_dir_rules(home: Path) -> None:
+    """默认 <distro>/snapshots；[data] root 外置时同级跟随。"""
+    layout = DistroLayout(root=home / "generic")
+    assert snapshots_dir(layout, DistroToml()) == home / "generic" / "snapshots"
+    toml = DistroToml(data_root=str(home / "ext" / "data"))
+    assert snapshots_dir(layout, toml) == home / "ext" / "snapshots"
