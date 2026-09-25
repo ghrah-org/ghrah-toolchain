@@ -565,9 +565,18 @@ class RuntimeRefManager:
         return digest.hexdigest()
 
     def _remove_editable_artifacts(self, venv: Path) -> None:
-        """删除 site-packages 内引用 ghrah 包的 editable 工件（``__editable__*``）。"""
+        """删除 site-packages 内引用 ghrah 包的 editable 工件。
+
+        覆盖两种形态（计划 §五 R1 风险的实测落地）：
+        - setuptools：``__editable__.<pkg>-<ver>.pth``（spike 时代形态）；
+        - uv：``_editable_impl_<pkg>.pth``（内容为版本树绝对路径，
+          按名排序先于自管 ``ghrah_bootloader_managed.pth`` 处理，
+          会遮蔽 current 段——必须清除）。
+        """
         site = managed_pth_path(venv).parent
-        for artifact in site.glob("__editable__*"):
+        for artifact in site.glob("*editable*"):
+            if artifact.name == "ghrah_bootloader_managed.pth":
+                continue
             try:
                 content = artifact.read_text(encoding="utf-8", errors="ignore")
             except OSError:

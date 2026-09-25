@@ -385,13 +385,16 @@ def stop_boot_session(
         print(f"[{distro}] boot 会话已不在运行（清理陈旧 pidfile，pid={pid}）")
         return 1
     if os.name == "posix":
-        cmdline = (
-            Path(f"/proc/{pid}/cmdline")
-            .read_bytes()
-            .replace(b"\0", b" ")
-            .decode("utf-8", "replace")
-        )
-        if "ghrah-bootloader" not in cmdline and "ghrah_bootloader" not in cmdline:
+        # 护栏依赖 /proc（Linux 独有；macOS 等 posix 平台无 /proc）。
+        # 存在性 + 读取双守卫：不可用时跳过 cmdline 校验并告警——pidfile
+        # 本身已是一道护栏，读失败不应让 stop 崩溃（跨平台回归位）。
+        cmdline = _read_cmdline_guard(pid)
+        if cmdline is None:
+            print(
+                f"[{distro}] 告警：无法读取 /proc/{pid}/cmdline，"
+                "跳过 cmdline 护栏，仅凭 pidfile 继续"
+            )
+        elif "ghrah-bootloader" not in cmdline and "ghrah_bootloader" not in cmdline:
             print(
                 f"[{distro}] 拒绝：pid {pid} 的 cmdline 不属于 ghrah-bootloader（{cmdline!r}）；"
                 "请人工核查后处理"
@@ -414,6 +417,21 @@ def stop_boot_session(
         return 2
     print(f"[{distro}] boot 会话已停止，端口已释放")
     return 0
+
+
+def _read_cmdline_guard(pid: int) -> str | None:
+    """读取 ``/proc/<pid>/cmdline`` 作为防误杀护栏；不可用返回 ``None``。
+
+    双守卫：``/proc`` 存在性（macOS 等 posix 无 /proc）+ 读取容错。
+    返回 ``None`` 时调用方应跳过护栏并告警，而非崩溃。
+    """
+    if not Path("/proc").is_dir():
+        return None
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return raw.replace(b"\0", b" ").decode("utf-8", "replace")
 
 
 def _session_exited(pid: int) -> bool:

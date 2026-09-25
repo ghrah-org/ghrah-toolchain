@@ -469,8 +469,11 @@ def _fake_installed_env(home: Path) -> tuple[Path, Path]:
     distro_root = home / "generic"
     tree = distro_root / "versions" / "2026.09"
     site = distro_root / "env" / ".venv" / "lib" / "python3.99" / "site-packages"
-    (site / "__editable__.ghrah_core-0.1.0.pth").parent.mkdir(parents=True)
+    site.mkdir(parents=True)
+    # setuptools 形态（spike 时代）与 uv 形态（0.10.x 实测：_editable_impl_<pkg>.pth，
+    # 内容为版本树绝对路径，会遮蔽 current 段——真实集成用例暴露）
     (site / "__editable__.ghrah_core-0.1.0.pth").write_text(str(tree), encoding="utf-8")
+    (site / "_editable_impl_ghrah_core.pth").write_text(str(tree), encoding="utf-8")
     (site / "__editable__.other_pkg-1.0.pth").write_text("/elsewhere", encoding="utf-8")
     tree.mkdir(parents=True, exist_ok=True)
     for rel in ("uv.lock", "pyproject.toml", "pnpm-lock.yaml"):
@@ -498,6 +501,7 @@ def test_sync_writes_managed_pth_and_cleans_editable(
     assert any(c[0] == "uv" and "sync" in c for c in cmds)  # 指纹变化 → 全量物化
     assert any(c[0] == "pnpm" and "install" in c for c in cmds)
     assert not (site / "__editable__.ghrah_core-0.1.0.pth").exists()  # ghrah 工件清理
+    assert not (site / "_editable_impl_ghrah_core.pth").exists()  # uv 形态同样清理
     assert (site / "__editable__.other_pkg-1.0.pth").exists()  # 非 ghrah 工件保留
     from ghrah_bootloader.layout import managed_pth_path, verify_managed_pth
 
