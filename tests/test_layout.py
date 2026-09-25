@@ -71,11 +71,41 @@ def test_distro_toml_missing_returns_defaults(home: Path) -> None:
     distro_dir.mkdir(parents=True)
     d = DistroToml.load(distro_dir)
     assert d.name == ""
+    assert d.install_mode == "packages"  # 缺省新模型（B2 安全阀缺省翻转）
     assert d.ref_source == "latest"
     assert d.ref_gate == "basic"
     assert d.subject_port == 4112
     assert d.webui_port == 5173
     assert d.snapshot_keep == 3
+
+
+def test_distro_toml_install_mode_worktree_readback(home: Path) -> None:
+    distro_dir = home / "generic"
+    distro_dir.mkdir(parents=True)
+    (distro_dir / "distro.toml").write_text(
+        """
+[distro]
+install_mode = "worktree"
+""",
+        encoding="utf-8",
+    )
+    assert DistroToml.load(distro_dir).install_mode == "worktree"
+
+
+def test_distro_toml_install_mode_invalid_rejected(home: Path) -> None:
+    from ghrah_bootloader.errors import LayoutError
+
+    distro_dir = home / "generic"
+    distro_dir.mkdir(parents=True)
+    (distro_dir / "distro.toml").write_text(
+        """
+[distro]
+install_mode = "hybrid"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(LayoutError, match="非法 install_mode"):
+        DistroToml.load(distro_dir)
 
 
 def test_distro_toml_parse(home: Path) -> None:
@@ -283,6 +313,7 @@ def test_render_distro_toml_readback(home: Path) -> None:
     assert d.ref_source == "branch:main"
     assert d.ref_gate == "basic"
     assert d.ref_fetch_on_update is False
+    assert d.install_mode == "packages"  # 模板显式写缺省模式，load 可读回
     assert d.subject_port == 4112
     assert d.webui_port == 5173
     assert d.data_root == ""

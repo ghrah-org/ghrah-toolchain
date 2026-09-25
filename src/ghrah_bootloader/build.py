@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -116,6 +117,22 @@ def normalize_commit(repo: Path, ref: str) -> str:
     if cp.returncode != 0 or not cp.stdout.strip():
         raise BuildError(f"候选 ref 解析失败: {ref!r}（{cp.stderr.strip() or '未知 ref'}）")
     return cp.stdout.strip()
+
+
+def read_source_commit(tree: Path) -> str | None:
+    """读产物树 ``BOOTSTRAP.toml`` 的 ``source_commit``（纯文件身份，零 git）。
+
+    文件缺失 / 解析失败 / 缺键 → ``None``（调用方决定回退策略）。
+    """
+    bootstrap = Path(tree) / "BOOTSTRAP.toml"
+    if not bootstrap.is_file():
+        return None
+    try:
+        data = tomllib.loads(bootstrap.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, OSError):
+        return None
+    commit = data.get("bootstrap", {}).get("source_commit")
+    return str(commit) if commit else None
 
 
 def build_artifacts(repo: Path, commit: str, *, out_dir: Path) -> BuildResult:

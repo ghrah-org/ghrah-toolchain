@@ -57,8 +57,20 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path) -> Path:
     monkeypatch.setenv("GHRAH_HOME", str(h))
     # 钉死环境：防止外层 env 泄漏影响 uv/pnpm 解析
     monkeypatch.delenv("GHRAH_MONOREPO_ROOT", raising=False)
-    monkeypatch.setenv("GHRAH_REF_SOURCE", f"commit:{self_commit(repo)}")
     h.mkdir(parents=True)
+    # 本文件既有用例锁定 worktree 链路（回归面）：预写显式模式
+    distro_root = h / "generic"
+    distro_root.mkdir(parents=True, exist_ok=True)
+    (distro_root / "distro.toml").write_text(
+        f"""
+[distro]
+install_mode = "worktree"
+
+[distro.repo]
+path = "{repo}"
+""",
+        encoding="utf-8",
+    )
     yield h
     # install 用例在 h 下真实 `git worktree add`——pytest 清 tmp 只删目录，
     # 不删源仓 .git/worktrees/ 元数据（残留会累积成僵尸记录，旧 tmp 未过期
@@ -75,6 +87,27 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path) -> Path:
         capture_output=True,
         check=False,
     )
+
+
+@pytest.fixture
+def home_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path) -> Path:
+    """packages 模式安装域（B2 I-P1：真实构建产物树）。"""
+    h = tmp_path / "ghrah-home-packages"
+    monkeypatch.setenv("GHRAH_HOME", str(h))
+    monkeypatch.delenv("GHRAH_MONOREPO_ROOT", raising=False)
+    distro_root = h / "generic"
+    distro_root.mkdir(parents=True)
+    (distro_root / "distro.toml").write_text(
+        f"""
+[distro]
+install_mode = "packages"
+
+[distro.repo]
+path = "{repo}"
+""",
+        encoding="utf-8",
+    )
+    return h
 
 
 def self_commit(repo: Path) -> str:
@@ -184,3 +217,41 @@ class TestPnpmInstall:
         webui = entry.path / "ghrah-observer-webui" / "packages" / "observer-web"
         assert (webui / "package.json").is_file()
         assert (webui / "vite.config.ts").is_file()
+
+
+class TestInstallPackagesMode:
+    """B2 I-P1：packages 模式真实构建物化 + 复用（真实 monorepo，分钟级）。"""
+
+    def test_install_materializes_artifact_tree_and_reuses(
+        self, home_packages: Path, repo: Path
+    ) -> None:
+        _require("uv", "pnpm", "git")
+        mgr = RuntimeRefManager(root=home_packages, repo=repo)
+        entry = mgr.ensure(distro="generic", gate="basic", source=f"commit:{self_commit(repo)}")
+
+        tree = entry.path
+        # 产物树形态：wheels 五包 + tarballs 三包 + observer-web + manifest + BOOTSTRAP
+        assert not (tree / ".git").exists(), "产物树不得含 .git（安装域自包含）"
+        wheels = sorted(p.name for p in (tree / "wheels").glob("*.whl"))
+        assert len(wheels) == 5, f"应有五个 wheel: {wheels}"
+        assert (tree / "wheels" / "pins.txt").is_file()
+        tarballs = sorted(p.name for p in (tree / "tarballs").glob("*.tgz"))
+        assert len(tarballs) == 3, f"应有三个 tarball: {tarballs}"
+        assert (tree / "observer-web" / "package.json").is_file()
+        assert (tree / "manifest.json").is_file()
+        bootstrap_commit = (tree / "BOOTSTRAP.toml").read_text(encoding="utf-8")
+        assert entry.commit in bootstrap_commit
+        # current / last-good 重指
+        assert (home_packages / "generic" / "current").resolve() == tree.resolve()
+
+        # 枚举面：显示 commit = BOOTSTRAP source_commit
+        entries = mgr.list_entries()
+        assert [e.commit for e in entries] == [entry.commit]
+
+        # 同 commit 二次 install：复用（零重建）
+        second = mgr.ensure(distro="generic", gate="basic", source=f"commit:{entry.commit}")
+        assert second.version == entry.version
+        assert second.path == entry.path
+        from ghrah_bootloader.layout import DistroLayout
+
+        assert DistroLayout(root=home_packages / "generic").list_versions() == [entry.version]

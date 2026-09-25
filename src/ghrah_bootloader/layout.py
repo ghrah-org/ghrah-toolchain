@@ -23,6 +23,8 @@ from ghrah_bootloader.errors import LayoutError
 
 _PTH_MARKER = "ghrah-bootloader-managed"
 _PACKAGE_DIRS = ("ghrah-core", "ghrah-protocol", "ghrah-subject")
+INSTALL_MODES = ("packages", "worktree")
+DEFAULT_INSTALL_MODE = "packages"
 
 # 数据面五项 env 常量（自 boot.py 迁入；boot.py 保留同名 re-export 视图）
 ENV_DB_PATH = "GHRAH_SUBJECT_DB_PATH"
@@ -97,6 +99,7 @@ class DistroToml:
 
     name: str = ""
     scenario: str = ""
+    install_mode: str = DEFAULT_INSTALL_MODE
     repo_path: str = ""
     ref_source: str = "latest"
     ref_gate: str = "basic"
@@ -123,9 +126,15 @@ class DistroToml:
         plugins = distro.get("plugins", {})
         runtime = data.get("runtime", {})
         data_section = data.get("data", {})
+        install_mode = str(distro.get("install_mode", DEFAULT_INSTALL_MODE))
+        if install_mode not in INSTALL_MODES:
+            raise LayoutError(
+                f"非法 install_mode: {install_mode!r}（应为 {' | '.join(INSTALL_MODES)}）"
+            )
         return cls(
             name=str(distro.get("name", "")),
             scenario=str(distro.get("scenario", "")),
+            install_mode=install_mode,
             repo_path=str(repo.get("path", "")),
             ref_source=str(ref.get("source", "latest")),
             ref_gate=str(ref.get("gate", "basic")),
@@ -250,6 +259,7 @@ def render_distro_toml(
         "[distro]",
         f"name = {_toml_str(name)}",
         'scenario = ""',
+        f"install_mode = {_toml_str(DEFAULT_INSTALL_MODE)}",
         "",
         "[distro.repo]",
         f"path = {_toml_str(repo_path)}",

@@ -76,9 +76,23 @@ def repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path) -> Path:
     h = tmp_path / "ghrah-home"
     monkeypatch.setenv("GHRAH_HOME", str(h))
+    # 既有用例锁定 worktree 链路（回归面）：预写显式模式的 distro.toml，
+    # 绕过缺省 packages（B2 翻转缺省后旧用例的 ensure 会走构建分支）。
+    distro_root = h / "generic"
+    distro_root.mkdir(parents=True)
+    (distro_root / "distro.toml").write_text(
+        f"""
+[distro]
+install_mode = "worktree"
+
+[distro.repo]
+path = "{repo}"
+""",
+        encoding="utf-8",
+    )
     return h
 
 
@@ -87,8 +101,8 @@ def _mgr(home: Path, repo: Path) -> RuntimeRefManager:
 
 
 def _mock_sync_gate(mgr: RuntimeRefManager, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(mgr, "_gate", lambda tree, level: "passed")
-    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False: None)
+    monkeypatch.setattr(mgr, "_gate", lambda tree, level, mode="worktree": "passed")
+    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False, mode="worktree": None)
 
 
 def _entry(version: str, commit: str = "cafe0000") -> BootEntry:
@@ -182,9 +196,12 @@ def test_repo_priority_cli_env_toml(
     other.mkdir()
     _git(other, "init", "-q")
     distro_root = home / "generic"
-    distro_root.mkdir(parents=True)
+    distro_root.mkdir(parents=True, exist_ok=True)
     (distro_root / "distro.toml").write_text(
         f"""
+[distro]
+install_mode = "worktree"
+
 [distro.repo]
 path = "{other}"
 """,
@@ -208,9 +225,12 @@ def test_ensure_source_falls_back_to_toml(
 ) -> None:
     head = _git(repo, "rev-parse", "HEAD")
     distro_root = home / "generic"
-    distro_root.mkdir(parents=True)
+    distro_root.mkdir(parents=True, exist_ok=True)
     (distro_root / "distro.toml").write_text(
         f"""
+[distro]
+install_mode = "worktree"
+
 [distro.repo]
 path = "{repo}"
 
@@ -323,7 +343,7 @@ def test_gate_failure_leaves_state_untouched(
 ) -> None:
     mgr = _mgr(home, repo)
     snapped: list[str] = []
-    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False: None)
+    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False, mode="worktree": None)
     monkeypatch.setattr(mgr, "_gate", _raising_gate)
     monkeypatch.setattr(mgr, "_snapshot", lambda *a, **k: snapped.append("snap"))
     with pytest.raises(GateError):
@@ -335,7 +355,7 @@ def test_gate_failure_leaves_state_untouched(
     assert BootToml.load(home).default is None  # boot.toml 未动
 
 
-def _raising_gate(tree, level):
+def _raising_gate(tree, level, mode="worktree"):
     raise GateError("门禁注入失败")
 
 
@@ -344,8 +364,10 @@ def test_switch_order_gate_snapshot_repoint(
 ) -> None:
     mgr = _mgr(home, repo)
     order: list[str] = []
-    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False: None)
-    monkeypatch.setattr(mgr, "_gate", lambda tree, level: order.append("gate") or "passed")
+    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False, mode="worktree": None)
+    monkeypatch.setattr(
+        mgr, "_gate", lambda tree, level, mode="worktree": order.append("gate") or "passed"
+    )
     monkeypatch.setattr(mgr, "_snapshot", lambda *a, **k: order.append("snapshot") or None)
     real_repoint = repoint_current
     monkeypatch.setattr(
@@ -366,15 +388,15 @@ def test_sync_failure_rolls_back_atomically(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mgr = _mgr(home, repo)
-    monkeypatch.setattr(mgr, "_gate", lambda tree, level: "passed")
+    monkeypatch.setattr(mgr, "_gate", lambda tree, level, mode="worktree": "passed")
     monkeypatch.setattr(mgr, "_snapshot", lambda *a, **k: None)
-    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False: None)
+    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False, mode="worktree": None)
     first = mgr.ensure(distro="generic")
     second_commit = _commit(repo, "b", "2026-09-20T10:00:00 +0000")
 
     calls: list[tuple[str, bool]] = []
 
-    def failing_sync(distro, ver, *, force=False):
+    def failing_sync(distro, ver, *, force=False, mode="worktree"):
         calls.append((ver, force))
         if not force:
             raise RuntimeError("uv sync 模拟失败")
@@ -414,8 +436,7 @@ def test_lock_blocks_concurrent_ensure(
 ) -> None:
     mgr = _mgr(home, repo)
     _mock_sync_gate(mgr, monkeypatch)
-    distro_root = home / "generic"
-    distro_root.mkdir(parents=True)
+    distro_root = home / "generic"  # home 夹具已预建（含 distro.toml）
     with acquire_distro_lock(distro_root):
         with pytest.raises(RuntimeRefError, match="锁"):
             mgr.ensure(distro="generic")
@@ -427,7 +448,6 @@ def test_stale_lock_with_dead_pid_recycled(
     mgr = _mgr(home, repo)
     _mock_sync_gate(mgr, monkeypatch)
     distro_root = home / "generic"
-    distro_root.mkdir(parents=True)
     distro_lock_path(distro_root).write_text("999999999", encoding="utf-8")
     entry = mgr.ensure(distro="generic")  # 陈旧锁（死 pid）被回收
     assert entry.version == "2026.09"
@@ -459,6 +479,44 @@ def test_gate_full_and_data_rejected(home: Path, repo: Path) -> None:
             mgr._gate(Path("/tmp"), level)
     with pytest.raises(GateError, match="未知门禁级别"):
         mgr._gate(Path("/tmp"), "weird")
+
+
+# ── 身份双跳（B2：显示面 BOOTSTRAP → git → None） ────────────
+
+
+def test_tree_commit_dual_protocol(home: Path, repo: Path) -> None:
+    from ghrah_bootloader.build import read_source_commit
+
+    mgr = _mgr(home, repo)
+    versions = home / "generic" / "versions"
+
+    # 产物形态树（有 BOOTSTRAP 无 .git）→ BOOTSTRAP 值优先
+    pkg_tree = versions / "2026.09"
+    (pkg_tree / "wheels").mkdir(parents=True)
+    (pkg_tree / "BOOTSTRAP.toml").write_text(
+        f'[bootstrap]\nsource_commit = "{"a" * 40}"\n', encoding="utf-8"
+    )
+    assert read_source_commit(pkg_tree) == "a" * 40
+    assert mgr._tree_commit(pkg_tree) == "a" * 40
+
+    # worktree 形态树（无 BOOTSTRAP 有 .git）→ git 值
+    wt_tree = versions / "2026.09-wt"
+    _git(repo, "worktree", "add", "--detach", str(wt_tree), "HEAD")
+    try:
+        assert read_source_commit(wt_tree) is None
+        assert mgr._tree_commit(wt_tree) == _git(repo, "rev-parse", "HEAD")
+    finally:
+        _git(repo, "worktree", "remove", "--force", str(wt_tree))
+
+    # 双缺目录 → None；损坏 BOOTSTRAP → 回退 git/None
+    bare = versions / "2026.09-bare"
+    bare.mkdir()
+    assert mgr._tree_commit(bare) is None
+    broken = versions / "2026.09-broken"
+    broken.mkdir()
+    (broken / "BOOTSTRAP.toml").write_text("not [ valid toml ==", encoding="utf-8")
+    assert read_source_commit(broken) is None
+    assert mgr._tree_commit(broken) is None
 
 
 # ── 自管 .pth 接线（D3） ─────────────────────────────────────

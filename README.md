@@ -21,15 +21,19 @@ ghrah AgentOS 安装/配置工具与引导器（独立包，CLI `ghrah-bootloade
 ~/.ghrah/                              # 「磁盘」：用户级安装域
   boot.toml                            # GPT + 引导菜单：default / fallback / last_good
   <distro>/                            # 一个发行版 = 分区 + 配套数据盘
-    distro.toml                        # 声明：repo / ref / gate / ports / [data]
+    distro.toml                        # 声明：install_mode / repo / ref / gate / ports / [data]
     data/                              # ★ 数据盘（版本无关，切换版本不动这里）
       subject.db · taskstore.sqlite3 · manifests/ · projects/ · workspace/
     snapshots/<ts>-v<old>→v<new>/      # 切换前快照（META.toml + data/ 完整拷贝，N 代滚动）
     legacy/adopt-<ts>/                 # 旧数据认领归档与备份（确认后可删）
-    env/.venv                          # 发行版运行依赖（自管 .pth → current 段）
+    env/.venv                          # 发行版运行依赖（worktree 模式：自管 .pth → current 段）
     current -> versions/<ver>          # 稳定路径：切换 = 原子重指
     last-good -> versions/<ver>        # 已知良好版本（救援目标）
-    versions/<ver>/                    # git worktree @ 固定 commit（纯代码）
+    versions/<ver>/                    # 双形态（install_mode 决定）：
+                                       #   packages：B1 构建产物树（wheels/ tarballs/
+                                       #     observer-web/ manifest.json/ BOOTSTRAP.toml，
+                                       #     无 .git，身份 = BOOTSTRAP source_commit）
+                                       #   worktree：git worktree @ 固定 commit（纯代码）
 ```
 
 安装域与数据域分离：版本树纯代码；数据落发行版级数据盘；boot 时数据有：
@@ -46,13 +50,29 @@ ghrah-bootloader install --distro generic --version 2026.09 \
 ```
 
 链路：解析候选 commit（`latest | branch:<n> | commit:<sha>`）→ 建版本树
-（git worktree --detach）→ 门禁 basic（候选临时 env 冒烟，不触碰发行版 env）
-→（存在旧 current 时）拍数据快照 → 原子重指 `current` → 按需 sync
-（依赖指纹变化才 uv sync / pnpm install）→ 写 boot.toml → 首装设 last-good。
+（install_mode 决定形态，见下）→ 门禁 basic（worktree：候选临时 env 冒烟；
+packages：产物验证——sha256 完整 + 全新 venv 装配 + import 冒烟，均不触碰
+发行版 env）→（存在旧 current 时）拍数据快照 → 原子重指 `current` →
+按需 sync（worktree：依赖指纹变化才 uv sync / pnpm install；packages：no-op）
+→ 写 boot.toml → 首装设 last-good。
 任一步失败等于什么都没发生（current/env/boot.toml 原值，新建树移除）。
 
 版本名缺省取候选提交日期 `%Y.%m`；同月同名自动加短 sha（如 `2026.09-8c932b0`）。
 已装同 commit 复用既有树，不建重复目录。
+
+#### 安装模式（`[distro] install_mode`，包管理化过渡）
+
+| 模式 | 版本树形态 | 门禁 | sync | 状态 |
+| --- | --- | --- | --- | --- |
+| `packages`（缺省） | B1 构建产物树（wheels/tarballs/manifest/BOOTSTRAP，无 `.git`） | `verify_artifacts` | no-op | B2 起 |
+| `worktree` | `git worktree --detach` | 临时 env uv sync 冒烟 | 按需 uv/pnpm | 过渡保留（B4 删除） |
+
+- 新域零配置走 `packages`；存量 worktree 域显式写 `install_mode = "worktree"`
+  保持可 boot，迁移（重跑 install 建产物树 + 归档旧树）属 B4。
+- 一个域一种模式：翻转后旧形态树仍可枚举（doctor 双跳显示），但不参与
+  复用判定——同名 install 报「版本名冲突」（fail-closed，不静默混用）。
+- **中间态边界**：packages 域可安装/切换/枚举，**暂不可 boot**（env 物化
+  语义由后续批次 per-generation env 重建并接线）。
 
 ### 2. 旧数据认领（一次性过渡）
 
@@ -122,8 +142,8 @@ ghrah-bootloader build --repo <monorepo> [--ref latest|branch:<n>|commit:<sha>] 
 从源仓固定 commit 构建发行物树（wheels / tarballs / observer-web /
 manifest.json / BOOTSTRAP.toml），构建成功默认自动验证（sha256 完整性 +
 全新 venv 装配 + import 冒烟 + entry point 存在性，`--no-verify` 跳过）。
-产物目录缺省 `<repo>/dist/bootloader/<short7>/`。本命令只做构建侧，
-不触碰安装域（基座物化属 B2）。
+产物目录缺省 `<repo>/dist/bootloader/<short7>/`。`install`（packages 模式）
+在安装域内走同一构建链路物化版本树。
 
 ## 平台支持
 
