@@ -36,6 +36,7 @@ from pathlib import Path
 
 from ghrah_bootloader import __version__
 from ghrah_bootloader.errors import BuildError
+from ghrah_bootloader.materialize import pnpm_command
 
 logger = logging.getLogger(__name__)
 
@@ -256,16 +257,16 @@ def _build_webui(src: Path, tarballs_dir: Path, staging: Path) -> list[tuple[Pat
     webui = src / WEBUI_ROOT_DIR
     if not webui.is_dir():
         raise BuildError(f"源树缺少 webui 目录: {webui}")
-    _run(["pnpm", "install", "--frozen-lockfile"], cwd=src)
+    _run(pnpm_command() + ["install", "--frozen-lockfile"], cwd=src)
     for pkg in WEBUI_PACKAGES:
-        _run(["pnpm", "--filter", pkg, "run", "build"], cwd=src)
+        _run(pnpm_command() + ["--filter", pkg, "run", "build"], cwd=src)
     tarballs_dir.mkdir(parents=True)
     entries: list[tuple[Path, str, str]] = []
     for pkg in WEBUI_PACK_TARBALLS:
         # pnpm pack 不支持 --filter（非递归命令）；--dir 直指包目录
         pkg_dir = webui / "packages" / pkg.rsplit("/", 1)[-1]
         _run(
-            ["pnpm", f"--dir={pkg_dir}", "pack", f"--pack-destination={tarballs_dir}"],
+            pnpm_command() + [f"--dir={pkg_dir}", "pack", f"--pack-destination={tarballs_dir}"],
             cwd=src,
         )
         meta = json.loads((pkg_dir / "package.json").read_text(encoding="utf-8"))

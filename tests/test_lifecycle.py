@@ -389,3 +389,86 @@ async def test_wait_for_server_timeout() -> None:
         port = s.getsockname()[1]
     with pytest.raises(TimeoutError, match="did not become ready"):
         await wait_for_server(f"http://127.0.0.1:{port}/health", timeout=0.5, name="test")
+
+
+# ── C4/W4：pnpm 调用统一（平台模拟） ─────────────────────────
+
+
+def test_start_webui_nt_uses_cmd_c_pnpm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nt：命令为 cmd /c pnpm dev …，creationflags 含 CREATE_NEW_PROCESS_GROUP。"""
+    from ghrah_bootloader import lifecycle as lc
+
+    class _OsProxy:
+        def __init__(self) -> None:
+            import os as real_os
+
+            object.__setattr__(self, "_real", real_os)
+
+        def __getattr__(self, item):
+            return getattr(object.__getattribute__(self, "_real"), item)
+
+        @property
+        def name(self) -> str:
+            return "nt"
+
+    webui = tmp_path / "observer-web"
+    webui.mkdir()
+    popen_calls: list[dict] = []
+
+    class _FakeProc:
+        pid = 4321
+
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, **kw):
+        popen_calls.append({"cmd": list(cmd), **kw})
+        return _FakeProc()
+
+    monkeypatch.setattr(lc, "os", _OsProxy(), raising=False)
+    # pnpm_command() 读 materialize 模块内的 os.name——同需代理
+    from ghrah_bootloader import materialize as mat
+
+    monkeypatch.setattr(mat, "os", _OsProxy(), raising=False)
+    # CREATE_NEW_PROCESS_GROUP 是 Windows-only subprocess 属性（真实 nt 恒在；
+    # Linux 模拟环境注入常量值以保证代码路径可达）
+    monkeypatch.setattr(lc.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
+    monkeypatch.setattr(lc.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(lc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(lc, "port_in_use", lambda host, port: False)
+    stack = lc.BootStack(lc.StackConfig(open_browser=False), webui_dir=webui)
+    stack._start_webui()
+    assert len(popen_calls) == 1
+    cmd = popen_calls[0]["cmd"]
+    assert cmd[:3] == ["cmd", "/c", "pnpm"]  # pnpm_command() 权威形态
+    assert cmd[3:] == ["dev", "--port", str(stack.config.webui_port), "--strictPort"]
+    assert popen_calls[0]["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+
+
+def test_start_webui_posix_uses_bare_pnpm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """posix：命令为裸 pnpm dev …，start_new_session=True。"""
+    from ghrah_bootloader import lifecycle as lc
+
+    webui = tmp_path / "observer-web"
+    webui.mkdir()
+    popen_calls: list[dict] = []
+
+    class _FakeProc:
+        pid = 4322
+
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, **kw):
+        popen_calls.append({"cmd": list(cmd), **kw})
+        return _FakeProc()
+
+    monkeypatch.setattr(lc.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(lc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(lc, "port_in_use", lambda host, port: False)
+    stack = lc.BootStack(lc.StackConfig(open_browser=False), webui_dir=webui)
+    stack._start_webui()
+    assert len(popen_calls) == 1
+    cmd = popen_calls[0]["cmd"]
+    assert cmd == ["pnpm", "dev", "--port", str(stack.config.webui_port), "--strictPort"]
+    assert popen_calls[0]["start_new_session"] is True

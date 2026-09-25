@@ -81,12 +81,19 @@ def distro_lock_path(distro_root: Path) -> Path:
     return distro_root / ".bootloader.lock"
 
 
-def _pid_alive(pid: int) -> bool:
+def _pid_alive(pid: int) -> bool | None:
+    """pid 存活探测（三值：``None`` = 探测不可用，fail-closed 由调用方处理）。
+
+    - POSIX：``os.kill(pid, 0)``（恒返回 bool）；
+    - Windows：``winproc.pid_alive``（OpenProcess + GetExitCodeProcess；
+      恒真桩退役——诊断 §二.2）。``None`` 仅在探测不可用时出现。
+    """
     if pid <= 0:
         return False
-    if os.name != "posix":
-        # Windows 无可移植的 pid 存活探测（os.kill 语义不同），依赖超时回收
-        return True
+    if os.name == "nt":
+        from ghrah_bootloader import winproc
+
+        return winproc.pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -102,7 +109,9 @@ def _lock_is_stale(path: Path, stale_after: float) -> bool:
         pid = int(path.read_text(encoding="utf-8").strip() or "0")
     except (OSError, ValueError):
         return True
-    return age > stale_after or not _pid_alive(pid)
+    # 探测不可用（None）不判死——时间兜底（600s）仍在，探测失败不应
+    # 让锁被误回收（与 pidfile 的 fail-closed 语义一致）
+    return age > stale_after or _pid_alive(pid) is False
 
 
 @contextlib.contextmanager
@@ -140,14 +149,31 @@ def _repoint_link(distro_root: Path, name: str, target: str, *, segment: str | N
 
     ``segment=None`` 时探测（generations 优先，回退 versions）——boot 救援
     链路零改动兼容双形态；显式传段锁定（ensure 链内不依赖探测）。
+
+    Windows 走 ``winproc.repoint_dir_link`` 三级回退（symlink+replace →
+    删旧建新 → junction；诊断 §二.4）；段字符串在此拼好，winproc 只收
+    绝对目标（段无关）。
     """
     if segment is None:
         segment = "generations" if (distro_root / "generations" / target).is_dir() else "versions"
+    link = distro_root / name
+    if os.name == "nt":
+        from ghrah_bootloader import winproc
+        from ghrah_bootloader.errors import WinProcError
+
+        target_abs = (distro_root / segment / target).resolve()
+        try:
+            strategy = winproc.repoint_dir_link(link, target_abs)
+        except WinProcError as e:
+            raise RuntimeRefError(f"重指 {name} 失败: {e}") from e
+        if strategy != "symlink-replace":
+            logger.info("Windows 重指采用回退策略 %s: %s", strategy, link)
+        return
     tmp = distro_root / f"{name}.tmp-{os.getpid()}"
     if tmp.is_symlink() or tmp.exists():
         tmp.unlink()
     tmp.symlink_to(f"{segment}/{target}")
-    os.replace(tmp, distro_root / name)
+    os.replace(tmp, link)
 
 
 def repoint_current(distro_root: Path, ver: str, *, segment: str | None = None) -> None:

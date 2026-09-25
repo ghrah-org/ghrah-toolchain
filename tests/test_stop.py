@@ -211,3 +211,189 @@ def test_stop_timeout_reports_stuck(home: Path) -> None:
         proc.kill()
         proc.wait(timeout=10)
         time.sleep(0.1)
+
+
+# ── C4/W2+W5：Windows stop 升级链（nt 模拟，mock winproc/_taskkill） ──
+
+
+class _OsProxy:
+    """os 模块代理：name=nt，其余属性透传真实 os（Path 不受毒化）。"""
+
+    def __init__(self) -> None:
+        import os as real_os
+
+        object.__setattr__(self, "_real", real_os)
+
+    def __getattr__(self, item):
+        return getattr(object.__getattribute__(self, "_real"), item)
+
+    @property
+    def name(self) -> str:
+        return "nt"
+
+
+class _StopNtSim:
+    """nt 停止链路模拟：os 代理（name=nt）+ mock winproc/_taskkill/_session_exited。"""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, image: str | None) -> None:
+        from ghrah_bootloader import boot as boot_mod
+        from ghrah_bootloader import winproc as winproc_mod
+
+        self.boot_mod = boot_mod
+        self.taskkill_calls: list[list[str]] = []
+        self.exited_answers: list[bool] = []
+        self.force_survives = False
+        self.graceful_exit = False
+        monkeypatch.setattr(boot_mod, "os", _OsProxy(), raising=False)
+        monkeypatch.setattr(winproc_mod, "process_image", lambda pid: image)
+        monkeypatch.setattr(
+            boot_mod,
+            "_taskkill",
+            lambda pid, force: self.taskkill_calls.append(
+                ["taskkill", "/F", "/T", "/PID", str(pid)]
+                if force
+                else ["taskkill", "/PID", str(pid)]
+            ),
+        )
+        sim = self
+
+        def exited_or_escalated(pid: int) -> bool:
+            # 优雅 taskkill 已发且开了 graceful_exit → 恒「已退出」
+            # （模拟优雅段内退出，摆脱对轮询拍数的精确预知）；
+            # 强杀（第二次 taskkill）已发 → 默认「已退出」（force_survives
+            # 例外：模拟强杀也不死的顽固进程）；否则消费答案序列
+            # （空后恒 False=活，绝不触真实探测）
+            if sim.taskkill_calls and sim.graceful_exit:
+                return True
+            if len(sim.taskkill_calls) >= 2:
+                return False if sim.force_survives else True
+            return sim.exited_answers.pop(0) if sim.exited_answers else False
+
+        monkeypatch.setattr(boot_mod, "_session_exited", exited_or_escalated)
+
+
+def test_stop_nt_escalation_chain(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """优雅 taskkill（无 /F）→ 轮询存活 → 超时强杀 /F /T → 退出 → 端口检查。"""
+    root = _distro_root(home)
+    pid = 4242
+    boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
+    sim = _StopNtSim(monkeypatch, image=r"C:\venv\Scripts\python.exe")
+    # 预检 + 优雅段轮询恒「活」（exited_or_escalated：强杀后恒「死」）
+    monkeypatch.setattr("ghrah_bootloader.boot._busy_ports", lambda *a, **kw: [])
+    rc = stop_boot_session("generic", timeout=0.3)
+    assert rc == 0
+    assert sim.taskkill_calls[0] == ["taskkill", "/PID", str(pid)]  # 优雅在前
+    assert sim.taskkill_calls[1] == ["taskkill", "/F", "/T", "/PID", str(pid)]  # 强杀升级
+    assert len(sim.taskkill_calls) == 2
+
+
+def test_stop_nt_graceful_exit_skips_force(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """优雅段内即退出 → 不触发强杀。"""
+    root = _distro_root(home)
+    pid = 4242
+    boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
+    sim = _StopNtSim(monkeypatch, image=r"C:\venv\Scripts\ghrah-bootloader.exe")
+    sim.graceful_exit = True  # 优雅 taskkill 后即退出
+    monkeypatch.setattr("ghrah_bootloader.boot._busy_ports", lambda *a, **kw: [])
+    rc = stop_boot_session("generic", timeout=5.0)
+    assert rc == 0
+    assert sim.taskkill_calls == [["taskkill", "/PID", str(pid)]]
+
+
+def test_stop_nt_force_survivor_reports_stuck(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """强杀后仍活 → rc=2 + nt 处置文案（tasklist）。"""
+    root = _distro_root(home)
+    pid = 4242
+    boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
+    sim = _StopNtSim(monkeypatch, image=r"C:\venv\Scripts\python.exe")
+    sim.force_survives = True  # 强杀也不死
+    rc = stop_boot_session("generic", timeout=0.2)
+    assert rc == 2
+    assert len(sim.taskkill_calls) == 2  # 优雅 + 强杀都试过
+    assert "tasklist" in capsys.readouterr().out
+
+
+def test_stop_nt_guard_rejects_foreign_image(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """护栏拒绝：映像名无关（notepad）→ rc=1、零 taskkill。"""
+    root = _distro_root(home)
+    pid = 4242
+    boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
+    sim = _StopNtSim(monkeypatch, image=r"C:\Windows\system32\notepad.exe")
+    rc = stop_boot_session("generic", timeout=1.0)
+    assert rc == 1
+    assert sim.taskkill_calls == []
+
+
+def test_stop_nt_guard_allows_python_and_bootloader(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """护栏放行：python.exe 与 ghrah-bootloader.exe 两种映像名。"""
+    for image in (r"C:\py\python.exe", r"C:\venv\Scripts\ghrah-bootloader.exe"):
+        root = _distro_root(home)
+        pid = 4242
+        boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
+        sim = _StopNtSim(monkeypatch, image=image)
+        sim.graceful_exit = True
+        monkeypatch.setattr("ghrah_bootloader.boot._busy_ports", lambda *a, **kw: [])
+        rc = stop_boot_session("generic", timeout=1.0)
+        assert rc == 0, image
+        assert sim.taskkill_calls, image
+
+
+def test_stop_nt_guard_unavailable_degrades(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """护栏不可用（process_image → None）→ 告警跳过 + 继续升级链。"""
+    root = _distro_root(home)
+    pid = 4242
+    boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
+    sim = _StopNtSim(monkeypatch, image=None)
+    sim.graceful_exit = True  # 护栏降级后优雅退出
+    monkeypatch.setattr("ghrah_bootloader.boot._busy_ports", lambda *a, **kw: [])
+    rc = stop_boot_session("generic", timeout=1.0)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "跳过映像名护栏" in out
+    assert sim.taskkill_calls == [["taskkill", "/PID", str(pid)]]
+
+
+def test_stop_nt_busy_ports_hint_windows(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """W5：会话退出但端口占用 → nt 文案含 netstat 指引。"""
+    root = _distro_root(home)
+    pid = 4242
+    boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
+    sim = _StopNtSim(monkeypatch, image=r"C:\venv\Scripts\python.exe")
+    sim.graceful_exit = True
+    monkeypatch.setattr("ghrah_bootloader.boot._busy_ports", lambda *a, **kw: [4112])
+    rc = stop_boot_session("generic", timeout=1.0)
+    assert rc == 2
+    assert "netstat" in capsys.readouterr().out
+
+
+def test_write_boot_pid_fails_closed_on_unknown(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W1 连锁：探测不可用（None）→ fail-closed 拒绝 + 人工处置文案。"""
+    from ghrah_bootloader import boot as boot_mod
+
+    root = _distro_root(home)
+    boot_pid_path(root).write_text("4242\n", encoding="utf-8")
+    monkeypatch.setattr(boot_mod, "_pid_alive", lambda pid: None)
+    with pytest.raises(BootloaderError, match="人工确认"):
+        _write_boot_pid(root)
+
+
+def test_write_boot_pid_recycles_on_dead_nt(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """W1 连锁：Windows 下 pid 死 → 陈旧 pidfile 正常回收（恒真桩缺陷消解）。"""
+    from ghrah_bootloader import boot as boot_mod
+
+    root = _distro_root(home)
+    boot_pid_path(root).write_text("4242\n", encoding="utf-8")
+    monkeypatch.setattr(boot_mod, "_pid_alive", lambda pid: False)
+    _write_boot_pid(root)
+    assert int(boot_pid_path(root).read_text(encoding="utf-8").strip()) == os.getpid()
+    _clear_boot_pid(root)

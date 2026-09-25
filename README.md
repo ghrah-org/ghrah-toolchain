@@ -166,10 +166,16 @@ manifest.json / BOOTSTRAP.toml），构建成功默认自动验证（sha256 完�
 | --- | --- |
 | Linux | 一级支持（主开发与验收平台） |
 | macOS | 支持（stop 的 `/proc` 护栏已守卫，无 `/proc` 时跳过并告警） |
-| Windows | **未支持**（代码含 nt 分支，但 pid 存活探测、stop 语义、symlink 原子重指三处核心机制存在实质缺口，修复已排期） |
+| Windows | **实验支持**（平台模拟验证；真机验收排 B4 后） |
 
 ## 注意事项
 
+- **Windows（实验支持）**：pid 探测经 OpenProcess + STILL_ACTIVE（退出码
+  恰为 259 的进程会被误判存活）；`stop` 为 taskkill 优雅→`/F /T` 强杀
+  升级链（控制台进程的优雅段常无效，实际语义≈强杀升级）；`current`/
+  `last-good` 重指三级回退（symlink+replace → 删旧建新 → junction），
+  未开开发者模式时落到 junction（绝对路径目标，安装域整体迁移会断链，
+  重新 install 可修复）。全部为平台模拟验证，未经真机验收。
 - **签出源默认 `latest` 是全局最近 ref tip**（跨全部分支，可能取到 WIP）；
   生产/验收建议 `commit:` 钉死。
 - **`full` / `data` 门禁未启用**（调用即明确报错，不静默降级）；启动计数

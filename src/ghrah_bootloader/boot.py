@@ -77,14 +77,24 @@ def boot_pid_path(distro_root: Path) -> Path:
 
 
 def _write_boot_pid(distro_root: Path) -> None:
-    """写 boot pidfile；已存在且 pid 活着 → 拒绝双启（陈旧则回收）。"""
+    """写 boot pidfile；已存在且 pid 活着 → 拒绝双启（陈旧则回收）。
+
+    探测不可用（Windows 无 ctypes 等非预期态）→ fail-closed 拒绝并给出
+    人工处置指引（mtime 回退对长跑会话不安全——会误回收活会话致双启）。
+    """
     path = boot_pid_path(distro_root)
     if path.exists():
         try:
             old = int(path.read_text(encoding="utf-8").strip() or "0")
         except (OSError, ValueError):
             old = 0
-        if _pid_alive(old):
+        alive = _pid_alive(old)
+        if alive is None:
+            raise BootloaderError(
+                f"无法探测旧 boot 会话 pid={old} 是否存活 ({path})；"
+                "请人工确认无会话运行后删除该文件再试"
+            )
+        if alive:
             raise BootloaderError(
                 f"已有 boot 会话在运行 (pid={old}, {path})；请先 ghrah-bootloader stop"
             )
@@ -370,14 +380,16 @@ def stop_boot_session(
     subject_port: int | None = None,
     webui_port: int | None = None,
 ) -> int:
-    """向运行中的 boot 会话转发 SIGTERM 并等待收束（前台 boot 的另一终端入口）。
+    """停止运行中的 boot 会话（前台 boot 的另一终端入口）。
 
-    流程：读 pidfile → pid 已死则清文件提示「未在运行」→ POSIX 校验
-    ``/proc/<pid>/cmdline`` 属于 ghrah-bootloader（防误杀）→ SIGTERM →
-    轮询 pid 退出与端口释放（超时不强杀，打印手工处置指引）。
+    流程：读 pidfile → pid 已死则清文件提示「未在运行」→ 平台护栏
+    （POSIX：``/proc/<pid>/cmdline``；Windows：进程映像名；防误杀）→
+    终止协议（POSIX：SIGTERM；Windows：taskkill 优雅→强杀升级链）→
+    轮询 pid 退出与端口释放。
 
     Returns:
-        0：会话已退出且端口释放；1：未在运行（含陈旧 pidfile 清理）；2：超时。
+        0：会话已退出且端口释放；1：未在运行（含陈旧 pidfile 清理 /
+        护栏拒绝）；2：超时。
     """
     import signal as _signal
     import time as _time
@@ -397,22 +409,11 @@ def stop_boot_session(
             pidfile.unlink()
         print(f"[{distro}] boot 会话已不在运行（清理陈旧 pidfile，pid={pid}）")
         return 1
-    if os.name == "posix":
-        # 护栏依赖 /proc（Linux 独有；macOS 等 posix 平台无 /proc）。
-        # 存在性 + 读取双守卫：不可用时跳过 cmdline 校验并告警——pidfile
-        # 本身已是一道护栏，读失败不应让 stop 崩溃（跨平台回归位）。
-        cmdline = _read_cmdline_guard(pid)
-        if cmdline is None:
-            print(
-                f"[{distro}] 告警：无法读取 /proc/{pid}/cmdline，"
-                "跳过 cmdline 护栏，仅凭 pidfile 继续"
-            )
-        elif "ghrah-bootloader" not in cmdline and "ghrah_bootloader" not in cmdline:
-            print(
-                f"[{distro}] 拒绝：pid {pid} 的 cmdline 不属于 ghrah-bootloader（{cmdline!r}）；"
-                "请人工核查后处理"
-            )
-            return 1
+    _stop_guard_rc = _stop_guard(distro, pid)
+    if _stop_guard_rc is not None:
+        return _stop_guard_rc
+    if os.name == "nt":
+        return _stop_windows(distro, distro_root, pid, timeout, subject_port, webui_port)
     print(f"[{distro}] 向 boot 会话 pid={pid} 发送 SIGTERM（逆序收束 webui → OS）")
     os.kill(pid, _signal.SIGTERM)
     deadline = _time.monotonic() + timeout
@@ -427,6 +428,111 @@ def stop_boot_session(
     ports_busy = _busy_ports(distro_root, subject_port, webui_port)
     if ports_busy:
         print(f"[{distro}] 会话已退出，但端口仍被占用: {ports_busy}（可能是残留子进程）")
+        return 2
+    print(f"[{distro}] boot 会话已停止，端口已释放")
+    return 0
+
+
+def _stop_guard(distro: str, pid: int) -> int | None:
+    """平台护栏：pid 是否仍属于 ghrah-bootloader 家族；拒绝时返回 rc=1。
+
+    - POSIX：``/proc/<pid>/cmdline``（无 /proc 平台跳过并告警）；
+    - Windows：进程映像名（OpenProcess + QueryFullProcessImageNameW），
+      探测不可用同样跳过并告警。pidfile 本身已是一道护栏。
+    """
+    if os.name == "posix":
+        # 护栏依赖 /proc（Linux 独有；macOS 等 posix 平台无 /proc）。
+        # 存在性 + 读取双守卫：不可用时跳过 cmdline 校验并告警——pidfile
+        # 本身已是一道护栏，读失败不应让 stop 崩溃（跨平台回归位）。
+        cmdline = _read_cmdline_guard(pid)
+        if cmdline is None:
+            print(
+                f"[{distro}] 告警：无法读取 /proc/{pid}/cmdline，"
+                "跳过 cmdline 护栏，仅凭 pidfile 继续"
+            )
+            return None
+        if "ghrah-bootloader" not in cmdline and "ghrah_bootloader" not in cmdline:
+            print(
+                f"[{distro}] 拒绝：pid {pid} 的 cmdline 不属于 ghrah-bootloader（{cmdline!r}）；"
+                "请人工核查后处理"
+            )
+            return 1
+        return None
+    from ghrah_bootloader import winproc
+
+    image = winproc.process_image(pid)
+    if image is None:
+        print(
+            f"[{distro}] 告警：无法查询 pid {pid} 的进程映像名，跳过映像名护栏，仅凭 pidfile 继续"
+        )
+        return None
+    base = image.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].lower()
+    if "ghrah-bootloader" not in base and "python" not in base:
+        print(
+            f"[{distro}] 拒绝：pid {pid} 的映像名不属于 ghrah-bootloader 家族"
+            f"（{image}）；请人工核查后处理"
+        )
+        return 1
+    return None
+
+
+def _taskkill(pid: int, *, force: bool) -> None:
+    """Windows 终止协议原语：优雅（WM_CLOSE 语义）或强杀（进程树）。"""
+    cmd = ["taskkill", "/PID", str(pid)]
+    if force:
+        cmd = ["taskkill", "/F", "/T", "/PID", str(pid)]
+    import subprocess as _subprocess
+
+    with contextlib.suppress(Exception):
+        _subprocess.run(cmd, capture_output=True, timeout=10, check=False)
+
+
+def _stop_windows(
+    distro: str,
+    distro_root: Path,
+    pid: int,
+    timeout: float,
+    subject_port: int | None,
+    webui_port: int | None,
+) -> int:
+    """Windows stop 升级链（W2）：taskkill 优雅 → 轮询 → ``/F /T`` 强杀。
+
+    优雅段返回码不检查（控制台进程的 WM_CLOSE 多半无效——诚实面：
+    实际语义≈「强杀升级链」；``/T`` 按进程树终止兜底 OS/webui 孤儿）。
+    对齐 lifecycle.terminate_process 已有的优雅→强杀模式，不引入第二种
+    终止协议。
+    """
+    import time as _time
+
+    print(f"[{distro}] 向 boot 会话 pid={pid} 发送 taskkill（优雅，超时升级 /F /T）")
+    _taskkill(pid, force=False)
+    deadline = _time.monotonic() + timeout
+    while not _session_exited(pid):
+        if _time.monotonic() >= deadline:
+            break
+        _time.sleep(0.2)
+    if _session_exited(pid):
+        return _stop_ports_check(distro, distro_root, subject_port, webui_port)
+    print(f"[{distro}] 优雅终止超时（{timeout}s），升级强杀: taskkill /F /T /PID {pid}")
+    _taskkill(pid, force=True)
+    grace = _time.monotonic() + 5.0
+    while not _session_exited(pid):
+        if _time.monotonic() >= grace:
+            print(
+                f'[{distro}] 强杀后 pid {pid} 仍在；请人工核查（tasklist /FI "PID eq {pid}"）后处置'
+            )
+            return 2
+        _time.sleep(0.2)
+    return _stop_ports_check(distro, distro_root, subject_port, webui_port)
+
+
+def _stop_ports_check(
+    distro: str, distro_root: Path, subject_port: int | None, webui_port: int | None
+) -> int:
+    ports_busy = _busy_ports(distro_root, subject_port, webui_port)
+    if ports_busy:
+        hint = "netstat -ano | findstr :<port>" if os.name == "nt" else "ss -ltnp | grep :<port>"
+        print(f"[{distro}] 会话已退出，但端口仍被占用: {ports_busy}（可能是残留子进程；{hint}）")
         return 2
     print(f"[{distro}] boot 会话已停止，端口已释放")
     return 0
@@ -451,9 +557,13 @@ def _session_exited(pid: int) -> bool:
     """会话是否已退出：pid 不存活，或 POSIX 下处于僵尸态（Z，未被 reap）。
 
     僵尸态进程已执行完毕，仅待父进程 wait；对调用方语义等同已退出。
+    探测不可用（None）视为未退出（fail-closed：stop 走超时路径而非误报）。
     """
-    if not _pid_alive(pid):
+    alive = _pid_alive(pid)
+    if alive is False:
         return True
+    if alive is None:
+        return False
     if os.name == "posix":
         with contextlib.suppress(OSError):
             stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")

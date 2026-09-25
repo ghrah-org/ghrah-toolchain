@@ -574,3 +574,140 @@ def test_sync_writes_managed_pth_and_cleans_editable(
     mgr._sync("generic", "2026.09")
     assert not any(c[0] == "uv" for c in cmds)
     assert verify_managed_pth(venv, current) is True  # 漂移被复核重写
+
+
+# ── C4/W1+W3：Windows 平台分派（nt 模拟，mock winproc 表面） ──
+
+
+def test_pid_alive_nt_dispatches_to_winproc(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nt 下 _pid_alive 分派 winproc.pid_alive（三值透传，恒真桩退役）。"""
+    from ghrah_bootloader import runtime_ref
+    from ghrah_bootloader import winproc as winproc_mod
+
+    calls: list[int] = []
+
+    def fake_pid_alive(pid: int):
+        calls.append(pid)
+        return None  # 探测不可用
+
+    monkeypatch.setattr(runtime_ref.os, "name", "nt", raising=False)
+    monkeypatch.setattr(winproc_mod, "pid_alive", fake_pid_alive)
+    assert runtime_ref._pid_alive(4242) is None
+    assert calls == [4242]
+    # 恒真桩语义已退役：探测不可用不再冒充「存活」
+    monkeypatch.setattr(winproc_mod, "pid_alive", lambda pid: False)
+    assert runtime_ref._pid_alive(4242) is False
+    monkeypatch.setattr(winproc_mod, "pid_alive", lambda pid: True)
+    assert runtime_ref._pid_alive(4242) is True
+    # pid<=0 提前返回（不触 winproc）
+    calls.clear()
+    assert runtime_ref._pid_alive(0) is False
+    assert runtime_ref._pid_alive(-1) is False
+    assert calls == []
+
+
+def test_lock_is_stale_three_valued(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """锁陈旧判定三值适配：None 不判死（时间兜底仍在），False 判死。"""
+    import time as time_mod
+
+    from ghrah_bootloader import runtime_ref
+
+    lock = home / ".bootloader.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("4242\n", encoding="utf-8")
+    monkeypatch.setattr(runtime_ref, "_pid_alive", lambda pid: None)
+    # None + 新鲜 → 不陈旧（探测失败不应误回收锁）
+    assert runtime_ref._lock_is_stale(lock, stale_after=600.0) is False  # None+新鲜
+    # None + 超时 → 陈旧（600s 时间兜底）
+    old = time_mod.localtime(time_mod.time() - 7200)
+    old_ts = time_mod.mktime(old)
+    import os as _os
+
+    _os.utime(lock, (old_ts, old_ts))
+    assert runtime_ref._lock_is_stale(lock, stale_after=600.0) is True
+    # False（pid 死）→ 陈旧
+    monkeypatch.setattr(runtime_ref, "_pid_alive", lambda pid: False)
+    _os.utime(lock, (time_mod.time(), time_mod.time()))
+    assert runtime_ref._lock_is_stale(lock, stale_after=600.0) is True
+
+
+def test_repoint_nt_dispatches_to_winproc(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nt 下 _repoint_link 分派 winproc.repoint_dir_link（段透传为绝对目标）。"""
+    from ghrah_bootloader import runtime_ref
+    from ghrah_bootloader import winproc as winproc_mod
+
+    distro_root = home / "generic"
+    gen_dir = distro_root / "generations" / "2026.09"
+    gen_dir.mkdir(parents=True)
+    calls: list[tuple[Path, Path]] = []
+
+    def fake_repoint(link: Path, target_abs: Path) -> str:
+        calls.append((link, target_abs))
+        return "junction"
+
+    monkeypatch.setattr(runtime_ref.os, "name", "nt", raising=False)
+    monkeypatch.setattr(winproc_mod, "repoint_dir_link", fake_repoint)
+    with caplog_probe():
+        runtime_ref.repoint_current(distro_root, "2026.09", segment="generations")
+    assert calls == [(distro_root / "current", gen_dir.resolve())]
+    # last-good 同分派
+    runtime_ref.repoint_last_good(distro_root, "2026.09", segment="generations")
+    assert calls[-1] == (distro_root / "last-good", gen_dir.resolve())
+    # segment=None 探测：generations 存在 → 仍以 generations 段传入
+    runtime_ref.repoint_current(distro_root, "2026.09")
+    assert calls[-1][1] == gen_dir.resolve()
+
+
+def test_repoint_nt_maps_winproc_error(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """winproc 失败 → RuntimeRefError（fail-closed 映射，含策略上下文）。"""
+    from ghrah_bootloader import runtime_ref
+    from ghrah_bootloader import winproc as winproc_mod
+    from ghrah_bootloader.errors import RuntimeRefError, WinProcError
+
+    distro_root = home / "generic"
+    (distro_root / "generations" / "2026.09").mkdir(parents=True)
+    monkeypatch.setattr(runtime_ref.os, "name", "nt", raising=False)
+
+    def bad_repoint(link: Path, target_abs: Path) -> str:
+        raise WinProcError("重指复核不一致")
+
+    monkeypatch.setattr(winproc_mod, "repoint_dir_link", bad_repoint)
+    with pytest.raises(RuntimeRefError, match="重指 current 失败"):
+        runtime_ref.repoint_current(distro_root, "2026.09", segment="generations")
+
+
+def test_repoint_posix_fast_path_unchanged(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """posix 快路径：仍走 tmp symlink + os.replace（零改动回归位）。"""
+    from ghrah_bootloader import runtime_ref
+    from ghrah_bootloader import winproc as winproc_mod
+
+    distro_root = home / "generic"
+    gen = distro_root / "generations" / "2026.09"
+    gen.mkdir(parents=True)
+    calls: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        winproc_mod,
+        "repoint_dir_link",
+        lambda lnk, tgt: calls.append((lnk, tgt)) or "junction",
+    )
+    runtime_ref.repoint_current(distro_root, "2026.09", segment="generations")
+    assert calls == []  # posix 不触 winproc
+    link = distro_root / "current"
+    assert link.is_symlink()
+    assert link.resolve() == gen
+    _assert_symlink_form(link, "generations/2026.09")
+
+
+def _assert_symlink_form(link: Path, expected: str) -> None:
+    assert os.readlink(link) == expected
+
+
+def caplog_probe():
+    """no-op 上下文（占位：保持 nt 分派用例的日志断言面简洁）。"""
+    import contextlib
+
+    return contextlib.nullcontext()

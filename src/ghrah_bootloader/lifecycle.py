@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ghrah_bootloader.health import wait_for_server
+from ghrah_bootloader.materialize import pnpm_command
 
 logger = logging.getLogger(__name__)
 
@@ -280,12 +281,15 @@ class BootStack:
             if not port_in_use(self._config.host, self._config.webui_port):
                 return
             await asyncio.sleep(0.2)
+        if os.name == "nt":
+            hint = "netstat -ano | findstr :%d / 任务管理器"
+        else:
+            hint = "ss -ltnp | grep %d 或 pkill -f vite"
         logger.warning(
             "webui port %d still in use after process group termination — "
-            "an external process may be listening (check with `ss -ltnp | "
-            "grep %d` or `pkill -f vite`)",
+            "an external process may be listening (check with `%s`)",
             self._config.webui_port,
-            self._config.webui_port,
+            hint % self._config.webui_port,
         )
 
     def _wait_webui_ready(self, proc: subprocess.Popen[bytes], timeout: float = 15.0) -> None:
@@ -324,30 +328,19 @@ class BootStack:
         self._write_webui_env_file(webui_dir)
         env = os.environ.copy()
         env["PORT"] = str(self._config.webui_port)
-        pnpm = shutil.which("pnpm")
-        assert pnpm is not None  # _ensure_pnpm 已保证
+        # pnpm_command()：Windows 的 pnpm 是 .cmd 批处理，无法被
+        # create_process 直接 exec（与 materialize/build 同一权威形态）
+        command: list[str] = pnpm_command() + [
+            "dev",
+            "--port",
+            str(self._config.webui_port),
+            "--strictPort",
+        ]
         if os.name == "nt":
-            # Windows 上 pnpm 是 .cmd 批处理，无法被 create_process 直接 exec
-            command: list[str] = [
-                "cmd",
-                "/c",
-                pnpm,
-                "dev",
-                "--port",
-                str(self._config.webui_port),
-                "--strictPort",
-            ]
             popen_kwargs: dict = {
                 "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
             }
         else:
-            command = [
-                pnpm,
-                "dev",
-                "--port",
-                str(self._config.webui_port),
-                "--strictPort",
-            ]
             popen_kwargs = {"start_new_session": True}
         self._webui_process = subprocess.Popen(
             command,

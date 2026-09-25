@@ -375,3 +375,74 @@ class TestBuildIntegration:
         )
         assert rc == 0
         assert (tmp_path / "b" / "BOOTSTRAP.toml").is_file()
+
+
+# ── C4/W4：pnpm 调用统一（nt 模拟，纯 mock 命令形态） ────────
+
+
+class TestW4PnpmCommandForm:
+    def test_build_webui_nt_uses_pnpm_command(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """nt：_build_webui 的 pnpm 族命令全部经 cmd /c pnpm 前缀。"""
+        import subprocess as real_subprocess
+
+        import ghrah_bootloader.build as bld
+        from ghrah_bootloader import materialize as mat
+
+        class _OsProxy:
+            def __init__(self) -> None:
+                import os as real_os
+
+                object.__setattr__(self, "_real", real_os)
+
+            def __getattr__(self, item):
+                return getattr(object.__getattribute__(self, "_real"), item)
+
+            @property
+            def name(self) -> str:
+                return "nt"
+
+        monkeypatch.setattr(bld, "os", _OsProxy(), raising=False)
+        monkeypatch.setattr(mat, "os", _OsProxy(), raising=False)
+        # 最小源树骨架：pnpm-workspace.yaml + webui 根 + 单包（含 package.json）
+        src = tmp_path / "src"
+        webui = src / "ghrah-observer-webui"
+        pkg = webui / "packages" / "a"
+        pkg.mkdir(parents=True)
+        (src / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
+        (pkg / "package.json").write_text(
+            '{"name": "@x/a", "version": "0.0.1", "private": false}\n', encoding="utf-8"
+        )
+        monkeypatch.setattr(bld, "WEBUI_ROOT_DIR", "ghrah-observer-webui", raising=False)
+        monkeypatch.setattr(bld, "OBSERVER_WEB_PACKAGE_DIR", "a", raising=False)
+        monkeypatch.setattr(bld, "WEBUI_PACKAGES", ("@x/a",), raising=False)
+        monkeypatch.setattr(bld, "WEBUI_PACK_TARBALLS", ("@x/a",), raising=False)
+        monkeypatch.setattr(bld, "OBSERVER_WEB_COPY", ("package.json",), raising=False)
+        cmds: list[list[str]] = []
+
+        def fake_run(cmd, *, cwd=None, check=True):
+            cmds.append([str(c) for c in cmd])
+            if "pack" in cmd:
+                # pack 会因无产物在后续断言失败——提前透传产物断言路径
+                raise bld.BuildError("stop-after-pack")
+            return real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(bld, "_run", fake_run)
+        with pytest.raises(bld.BuildError, match="stop-after-pack"):
+            bld._build_webui(src, tmp_path / "tarballs", tmp_path / "staging")
+        pnpm_cmds = [c for c in cmds if c and c[0] in ("pnpm", "cmd")]
+        assert pnpm_cmds, "应至少发起一次 pnpm 族命令"
+        for c in pnpm_cmds:
+            assert c[:3] == ["cmd", "/c", "pnpm"], c
+
+    def test_pnpm_command_posix_bare(self) -> None:
+        import os as real_os
+
+        from ghrah_bootloader.materialize import pnpm_command
+
+        if real_os.name == "nt":  # 真机 Windows 不强断言（CI 面 posix）
+            import pytest
+
+            pytest.skip("posix 形态断言仅非 nt 平台")
+        assert pnpm_command() == ["pnpm"]

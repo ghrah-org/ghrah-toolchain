@@ -37,3 +37,7 @@ class BuildError(BootloaderError):
 
 class MaterializeError(BootloaderError):
     """组合代物化失败（env 装配、清单读写或完整性校验不过）。"""
+
+
+class WinProcError(BootloaderError):
+    """Windows 进程探测/链接原语失败（pid 探测异常、重指复核不一致等）。"""
