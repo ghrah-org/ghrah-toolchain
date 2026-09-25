@@ -341,3 +341,14 @@ def test_snapshots_dir_rules(home: Path) -> None:
     assert snapshots_dir(layout, DistroToml()) == home / "generic" / "snapshots"
     toml = DistroToml(data_root=str(home / "ext" / "data"))
     assert snapshots_dir(layout, toml) == home / "ext" / "snapshots"
+
+
+def test_generations_listing(home: Path) -> None:
+    """generations 属性与 list_generations（空目录/缺目录 → 空）。"""
+    layout = DistroLayout(root=home / "generic")
+    assert layout.generations == home / "generic" / "generations"
+    assert layout.list_generations() == []  # 缺目录 → 空
+    (layout.generations / "2026.09").mkdir(parents=True)
+    (layout.generations / "2026.09+p12345678").mkdir()
+    (layout.generations / "stray.txt").write_text("x", encoding="utf-8")
+    assert layout.list_generations() == ["2026.09", "2026.09+p12345678"]

@@ -33,3 +33,7 @@ class AdoptError(BootloaderError):
 
 class BuildError(BootloaderError):
     """发行物构建/验证失败（子进程失败、产物不完整或校验不过）。"""
+
+
+class MaterializeError(BootloaderError):
+    """组合代物化失败（env 装配、清单读写或完整性校验不过）。"""

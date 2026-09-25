@@ -143,7 +143,7 @@ def test_resolve_boot_target_version_mismatch_rejected(tmp_path: Path) -> None:
 
 
 def test_resolve_boot_target_current_escape_rejected(tmp_path: Path) -> None:
-    """current 指向 versions/ 之外的路径时拒绝引导。"""
+    """current 指向受管段（versions/ ∪ generations/）之外的路径时拒绝引导。"""
     from ghrah_bootloader.errors import BootloaderError
 
     _make_distro(tmp_path)
@@ -151,7 +151,7 @@ def test_resolve_boot_target_current_escape_rejected(tmp_path: Path) -> None:
     outside.mkdir()
     (tmp_path / "generic" / "current").unlink()
     (tmp_path / "generic" / "current").symlink_to(outside)
-    with pytest.raises(BootloaderError, match="versions/ 之外"):
+    with pytest.raises(BootloaderError, match="versions/ 或 generations/ 之外"):
         resolve_boot_target("generic", None, root=tmp_path)
 
 
@@ -469,3 +469,57 @@ async def test_run_boot_updates_last_good_after_start(
     assert layout.last_good.is_symlink()
     assert layout.last_good.resolve().name == "2026.09"
     assert BootToml.load(root).last_good == "generic/2026.09"
+
+
+# ── 双段解析（B3.5：generations ∪ versions 并存期） ─────────
+
+
+def test_resolve_boot_target_current_to_generation(tmp_path: Path) -> None:
+    """packages 域 current → generations/<gen-id> 可解析引导。"""
+    _make_distro(tmp_path)
+    gen = tmp_path / "generic" / "generations" / "2026.09"
+    gen.mkdir(parents=True)
+    (tmp_path / "generic" / "current").unlink()
+    (tmp_path / "generic" / "current").symlink_to(gen)
+    target = resolve_boot_target("generic", None, root=tmp_path)
+    assert target.version == "2026.09"
+    assert target.tree == gen.resolve()
+
+
+def test_resolve_boot_target_generation_escape_still_rejected(tmp_path: Path) -> None:
+    """generations 段内多层目标（generations/<gen>/sub）不算单层代，拒绝。"""
+    from ghrah_bootloader.errors import BootloaderError
+
+    _make_distro(tmp_path)
+    deep = tmp_path / "generic" / "generations" / "2026.09" / "sub"
+    deep.mkdir(parents=True)
+    (tmp_path / "generic" / "current").unlink()
+    (tmp_path / "generic" / "current").symlink_to(deep)
+    with pytest.raises(BootloaderError, match="之外"):
+        resolve_boot_target("generic", None, root=tmp_path)
+
+
+def test_resolve_boot_target_ref_last_good_generation(tmp_path: Path) -> None:
+    """--ref last-good：符号链接指向代目录时目标为该代。"""
+    _make_distro(tmp_path)
+    gen = tmp_path / "generic" / "generations" / "2026.09"
+    gen.mkdir(parents=True)
+    (tmp_path / "generic" / "last-good").symlink_to(gen)
+    target = resolve_boot_target("generic", None, root=tmp_path, ref="last-good")
+    assert target.version == "2026.09"
+    assert target.tree == gen.resolve()
+
+
+def test_resolve_boot_target_ref_last_good_toml_generation(tmp_path: Path) -> None:
+    """last-good 符号链接缺失 → 回退 boot.toml.last_good（generations 优先查）。"""
+    gen = tmp_path / "generic" / "generations" / "2026.09"
+    gen.mkdir(parents=True)
+    (tmp_path / "generic" / "distro.toml").write_text(
+        "[distro]\nname = 'generic'\n", encoding="utf-8"
+    )
+    (tmp_path / "boot.toml").write_text(
+        'default = "generic/2026.09"\nlast_good = "generic/2026.09"\n', encoding="utf-8"
+    )
+    target = resolve_boot_target("generic", None, root=tmp_path, ref="last-good")
+    assert target.version == "2026.09"
+    assert target.tree == gen.resolve()

@@ -131,6 +131,22 @@ def os_server_command(venv: Path) -> list[str]:
     return [str(server)]
 
 
+def _within_managed_segment(layout: DistroLayout, tree: Path) -> bool:
+    """树是否落在受管段（generations/ ∪ versions/）内的单层目标。
+
+    双段兼容期（B3.5）：packages 域 current → generations/<gen-id>，worktree
+    域 current → versions/<ver>；两段之外逃逸拒绝（B4.4 收敛 generations-only）。
+    """
+    for segment in (layout.generations, layout.versions):
+        try:
+            rel = tree.relative_to(segment.resolve())
+        except (ValueError, OSError):
+            continue
+        if len(rel.parts) == 1:
+            return True
+    return False
+
+
 def resolve_boot_target(
     distro_arg: str | None,
     version_arg: str | None,
@@ -167,10 +183,8 @@ def resolve_boot_target(
                 f"current 未指向任何版本: {layout.current}（先安装发行版并重指 current）"
             )
         tree = layout.current.resolve()
-        try:
-            tree.relative_to(layout.versions.resolve())
-        except ValueError as e:
-            raise BootloaderError(f"current 指向 versions/ 之外的路径: {tree}") from e
+        if not _within_managed_segment(layout, tree):
+            raise BootloaderError(f"current 指向 versions/ 或 generations/ 之外的路径: {tree}")
         version = tree.name
         if version_arg and version_arg != version:
             raise BootloaderError(
@@ -196,17 +210,16 @@ def _resolve_last_good_tree(layout: DistroLayout, boot: BootToml, distro: str) -
     """last-good 目标树：符号链接优先，缺失回退 ``boot.toml.last_good``。"""
     if layout.last_good.is_symlink() or layout.last_good.exists():
         tree = layout.last_good.resolve()
-        try:
-            tree.relative_to(layout.versions.resolve())
-        except ValueError as e:
-            raise BootloaderError(f"last-good 指向 versions/ 之外的路径: {tree}") from e
+        if not _within_managed_segment(layout, tree):
+            raise BootloaderError(f"last-good 指向 versions/ 或 generations/ 之外的路径: {tree}")
         return tree
     if boot.last_good and "/" in boot.last_good:
         lg_distro, lg_ver = boot.last_good.split("/", 1)
         if lg_distro == distro:
-            tree = (layout.versions / lg_ver).resolve()
-            if tree.is_dir():
-                return tree
+            for segment in (layout.generations, layout.versions):
+                tree = (segment / lg_ver).resolve()
+                if tree.is_dir():
+                    return tree
     raise BootloaderError(
         f"last-good 未设置或不可用: {layout.last_good} / boot.toml last_good={boot.last_good!r}"
     )

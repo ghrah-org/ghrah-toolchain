@@ -26,14 +26,22 @@ ghrah AgentOS 安装/配置工具与引导器（独立包，CLI `ghrah-bootloade
       subject.db · taskstore.sqlite3 · manifests/ · projects/ · workspace/
     snapshots/<ts>-v<old>→v<new>/      # 切换前快照（META.toml + data/ 完整拷贝，N 代滚动）
     legacy/adopt-<ts>/                 # 旧数据认领归档与备份（确认后可删）
-    env/.venv                          # 发行版运行依赖（worktree 模式：自管 .pth → current 段）
-    current -> versions/<ver>          # 稳定路径：切换 = 原子重指
-    last-good -> versions/<ver>        # 已知良好版本（救援目标）
+    env/.venv                          # worktree 模式运行依赖（自管 .pth → current 段；
+                                       #   packages 模式不用——env 在各代内，B4.4 删除）
     versions/<ver>/                    # 双形态（install_mode 决定）：
                                        #   packages：B1 构建产物树（wheels/ tarballs/
                                        #     observer-web/ manifest.json/ BOOTSTRAP.toml，
                                        #     无 .git，身份 = BOOTSTRAP source_commit）
                                        #   worktree：git worktree @ 固定 commit（纯代码）
+    generations/<gen-id>/              # ★ 组合代（packages 模式）：门禁与切换单元
+      GENERATION.toml                  #   基座 ver+commit、插件集（B3 恒空）、pins_sha256
+      .deps-fingerprint                #   canonical 内容哈希（排除 built_at）→ 复用判定
+      env/.venv/                       #   基座 wheels + pins 平铺安装（uv，安装期零解析）
+      env/node/                        #   webui shim（file: + pnpm.overrides）+ lock 固化
+    cache/uv · cache/pnpm-store        # 内容寻址缓存（硬链接摊薄各代体量）
+    current -> generations/<gen-id>    # 稳定路径：切换 = 原子重指（packages）
+                                       #   worktree 域 → versions/<ver>（并存期双段兼容）
+    last-good -> generations/<gen-id>  # 已知良好组合（救援目标；worktree 域 → versions/）
 ```
 
 安装域与数据域分离：版本树纯代码；数据落发行版级数据盘；boot 时数据有：
@@ -50,29 +58,35 @@ ghrah-bootloader install --distro generic --version 2026.09 \
 ```
 
 链路：解析候选 commit（`latest | branch:<n> | commit:<sha>`）→ 建版本树
-（install_mode 决定形态，见下）→ 门禁 basic（worktree：候选临时 env 冒烟；
-packages：产物验证——sha256 完整 + 全新 venv 装配 + import 冒烟，均不触碰
-发行版 env）→（存在旧 current 时）拍数据快照 → 原子重指 `current` →
-按需 sync（worktree：依赖指纹变化才 uv sync / pnpm install；packages：no-op）
-→ 写 boot.toml → 首装设 last-good。
-任一步失败等于什么都没发生（current/env/boot.toml 原值，新建树移除）。
+（install_mode 决定形态，见下）→ [packages] 物化组合代（per-gen env：
+`uv pip install` wheels+pins 平铺 + webui shim `pnpm install`）→ 门禁 basic
+（worktree：候选临时 env 冒烟；packages：**代 env 冒烟**（import 五包 +
+server 入口存在），绝不触碰 worktree 模式的发行版 `env/`）→（存在旧
+current 时）拍数据快照 → 原子重指 `current`（packages → `generations/<gen>`）
+→ 按需 sync（worktree：依赖指纹变化才 uv sync / pnpm install；packages：
+代复核——指纹一致零操作）→ 写 boot.toml → 首装设 last-good。
+任一步失败等于什么都没发生（current/env/boot.toml 原值，新建基座树与代移除）。
 
 版本名缺省取候选提交日期 `%Y.%m`；同月同名自动加短 sha（如 `2026.09-8c932b0`）。
-已装同 commit 复用既有树，不建重复目录。
+已装同 commit 复用既有树，不建重复目录。代名（gen-id）确定性：无插件 =
+基座版本名；同（基座 × 插件集）→ 同代 → 双层复用（零重建零物化）。
 
 #### 安装模式（`[distro] install_mode`，包管理化过渡）
 
-| 模式 | 版本树形态 | 门禁 | sync | 状态 |
-| --- | --- | --- | --- | --- |
-| `packages`（缺省） | B1 构建产物树（wheels/tarballs/manifest/BOOTSTRAP，无 `.git`） | `verify_artifacts` | no-op | B2 起 |
-| `worktree` | `git worktree --detach` | 临时 env uv sync 冒烟 | 按需 uv/pnpm | 过渡保留（B4 删除） |
+| 模式 | 版本树形态 | 组合代 | 门禁 | sync | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| `packages`（缺省） | B1 构建产物树（无 `.git`） | `generations/<gen-id>/`（per-gen env） | 代 env 冒烟 | 代复核 | B3 起 |
+| `worktree` | `git worktree --detach` | 无（发行版级 `env/` + 自管 `.pth`） | 临时 env uv sync 冒烟 | 按需 uv/pnpm | 过渡保留（B4 删除） |
 
 - 新域零配置走 `packages`；存量 worktree 域显式写 `install_mode = "worktree"`
-  保持可 boot，迁移（重跑 install 建产物树 + 归档旧树）属 B4。
+  保持可 boot，迁移（重跑 install 建产物树与代 + 归档旧树）属 B4。
 - 一个域一种模式：翻转后旧形态树仍可枚举（doctor 双跳显示），但不参与
   复用判定——同名 install 报「版本名冲突」（fail-closed，不静默混用）。
-- **中间态边界**：packages 域可安装/切换/枚举，**暂不可 boot**（env 物化
-  语义由后续批次 per-generation env 重建并接线）。
+- **中间态边界**：packages 域可安装/切换/枚举，代 env 已物化，但**暂不可
+  boot**（OS 入口经 current 进代 + webui 静态 serve 的接线属 B4）。
+- **webui 第三方依赖解析漂移（诚实声明）**：基座 manifest 只含 Python pin
+  集；webui 第三方依赖在代物化时由 pnpm 现场解析、以生成的 `pnpm-lock.yaml`
+  固化在代内——同代复用零解析，但换代可能拉到新的第三方版本（收束进 B6）。
 
 ### 2. 旧数据认领（一次性过渡）
 
@@ -111,8 +125,9 @@ ghrah-bootloader runtime status            # current / 候选 / 落后 / last_go
 ghrah-bootloader runtime update [--source <src>] [--gate basic] [--fetch]
 ```
 
-与 install 同一状态机（门禁 → 快照 → 重指 → 按需 sync）；依赖指纹一致时
-切换是**纯重指**（自管 `.pth` 指向 `current` 段，重指即换导入源）。
+与 install 同一状态机（门禁 → 快照 → 重指 → 按需 sync）；worktree 域依赖
+指纹一致时切换是**纯重指**（自管 `.pth` 指向 `current` 段，重指即换导入源）；
+packages 域切换 = 换代（同组合复用零物化，重指 `current` → 代目录）。
 
 ### 5. 救援
 
@@ -129,8 +144,8 @@ ghrah-bootloader boot --ref last-good --restore-snapshot [--yes]
 ### 6. 诊断
 
 ```bash
-ghrah-bootloader distro list    # 发行版与版本清单（读 GPT）
-ghrah-bootloader doctor         # 布局 / default / current commit / 落后情况
+ghrah-bootloader distro list    # 发行版与版本/组合代清单（代注明 base 与插件集）
+ghrah-bootloader doctor         # 布局 / default / current commit / 落后情况 / generations
 ```
 
 ### 7. 构建发行物（包管理化 B1）

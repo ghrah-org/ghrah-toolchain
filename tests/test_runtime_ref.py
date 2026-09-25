@@ -331,7 +331,7 @@ def test_resolve_current_escape_rejected(home: Path, repo: Path) -> None:
     outside.mkdir()
     (home / "generic" / "current").symlink_to(outside)
     mgr = _mgr(home, repo)
-    with pytest.raises(RuntimeRefError, match="versions/ 之外"):
+    with pytest.raises(RuntimeRefError, match="versions/ 或 generations/ 之外"):
         mgr.resolve("generic")
 
 

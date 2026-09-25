@@ -33,6 +33,7 @@ from ghrah_bootloader.layout import (
     render_distro_toml,
     resolve_distro_root,
 )
+from ghrah_bootloader.materialize import read_generation
 from ghrah_bootloader.runtime_ref import RefSource, RuntimeRefManager
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,7 @@ def _short(commit: str | None) -> str:
 
 
 def _cmd_distro_list(args: argparse.Namespace) -> int:
-    """列出发行版与版本（读 ~/.ghrah 布局 = 读 GPT；附各版本 commit）。"""
+    """列出发行版与版本/组合代（读 ~/.ghrah 布局 = 读 GPT；附各条目 commit）。"""
     del args  # 未用（预留 --json 等输出控制）
     boot = BootToml.load()
     distros = list_distros()
@@ -88,6 +89,7 @@ def _cmd_distro_list(args: argparse.Namespace) -> int:
     for distro in distros:
         layout = DistroLayout(root=resolve_distro_root(distro))
         versions = layout.list_versions()
+        gens = layout.list_generations()
         marker = ""
         if boot.default and boot.default.startswith(f"{distro}/"):
             marker = boot.default.split("/", 1)[1]
@@ -101,6 +103,15 @@ def _cmd_distro_list(args: argparse.Namespace) -> int:
             for v in versions
         )
         print(f"{distro:<16} {marker or '-':<8} {rendered or '-'} (current: {current})")
+        if gens:
+            gen_rows = []
+            for g in gens:
+                e = entries.get((distro, g))
+                if e is not None:
+                    gen_rows.append(e.detail)
+                else:
+                    gen_rows.append(g)
+            print(f"{'':<16} {'':<8} generations: {'; '.join(gen_rows)}")
     return 0
 
 
@@ -140,8 +151,13 @@ def _cmd_install(args: argparse.Namespace) -> int:
         version=args.version,
         gate=_resolve_gate(args, distro_toml),
     )
-    form = "产物树（packages 模式）" if distro_toml.install_mode == "packages" else "worktree"
-    print(f"已安装并重指 current → {entry.label}（commit {entry.commit}，{form}）")
+    if distro_toml.install_mode == "packages":
+        print(
+            f"已安装并重指 current → {entry.label}（commit {entry.commit}，"
+            f"组合代 {entry.version} 已物化，env 就位；boot 接线属 B4）"
+        )
+    else:
+        print(f"已安装并重指 current → {entry.label}（commit {entry.commit}，worktree）")
     if args.adopt_legacy_data:
         report = adopt_legacy(DistroLayout(root=distro_root), distro_toml, subject_port=None)
         if not report.noop:
@@ -177,8 +193,14 @@ def _cmd_runtime_status(args: argparse.Namespace) -> int:
     entries = [e for e in manager.list_entries() if e.distro == distro]
     print(
         f"[{distro}] versions = "
-        + (", ".join(f"{e.version}@{_short(e.commit)}" for e in entries) or "（无）")
+        + (
+            ", ".join(f"{e.version}@{_short(e.commit)}" for e in entries if e.kind == "version")
+            or "（无）"
+        )
     )
+    gens = [e for e in entries if e.kind == "generation"]
+    if gens or layout.list_generations():
+        print(f"[{distro}] generations = " + (", ".join(e.detail for e in gens) or "（无）"))
     print(
         f"[{distro}] 配置 source = {distro_toml.ref_source} gate = {distro_toml.ref_gate} "
         f"install_mode = {distro_toml.install_mode} "
@@ -295,7 +317,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         try:
             tree = layout.current.resolve()
             current_target = str(tree)
-            commit = manager._tree_commit(tree)
+            info = read_generation(tree)
+            if info is not None:
+                commit = info.base_commit
+            else:
+                commit = manager._tree_commit(tree)
         except (OSError, RuntimeError):
             current_target = "(current 缺失)"
         behind = "候选不可解析"
@@ -317,6 +343,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             identity_note = "（版本树缺 BOOTSTRAP/git 身份：旧 worktree 形态或异常态）"
         print(
             f"[{distro}] versions={layout.list_versions() or '-'} "
+            f"generations={layout.list_generations() or '-'} "
             f"current={current_target} commit={_short(commit)}{identity_note} "
             f"install_mode={distro_toml.install_mode} "
             f"落后情况={behind} "

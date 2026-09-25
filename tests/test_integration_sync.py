@@ -220,7 +220,7 @@ class TestPnpmInstall:
 
 
 class TestInstallPackagesMode:
-    """B2 I-P1：packages 模式真实构建物化 + 复用（真实 monorepo，分钟级）。"""
+    """B2/B3 I-P1：packages 模式真实构建物化 + 代物化 + 双层复用（真实 monorepo，分钟级）。"""
 
     def test_install_materializes_artifact_tree_and_reuses(
         self, home_packages: Path, repo: Path
@@ -229,7 +229,9 @@ class TestInstallPackagesMode:
         mgr = RuntimeRefManager(root=home_packages, repo=repo)
         entry = mgr.ensure(distro="generic", gate="basic", source=f"commit:{self_commit(repo)}")
 
-        tree = entry.path
+        # 基座产物树（entry.path 是代目录；无插件 gen_id = 基座版本名 → 同名异位）
+        base_tree = home_packages / "generic" / "versions" / entry.version
+        tree = base_tree
         # 产物树形态：wheels 五包 + tarballs 三包 + observer-web + manifest + BOOTSTRAP
         assert not (tree / ".git").exists(), "产物树不得含 .git（安装域自包含）"
         wheels = sorted(p.name for p in (tree / "wheels").glob("*.whl"))
@@ -241,17 +243,82 @@ class TestInstallPackagesMode:
         assert (tree / "manifest.json").is_file()
         bootstrap_commit = (tree / "BOOTSTRAP.toml").read_text(encoding="utf-8")
         assert entry.commit in bootstrap_commit
-        # current / last-good 重指
-        assert (home_packages / "generic" / "current").resolve() == tree.resolve()
 
-        # 枚举面：显示 commit = BOOTSTRAP source_commit
+        # B3：组合代物化（无插件 gen_id = 基座版本名；entry.path 即代目录）
+        from ghrah_bootloader.materialize import FINGERPRINT_NAME, read_generation
+
+        assert entry.kind == "generation"
+        gen = home_packages / "generic" / "generations" / entry.version
+        assert entry.path == gen
+        info = read_generation(gen)
+        assert info is not None and info.base_commit == entry.commit
+        assert (gen / FINGERPRINT_NAME).is_file()
+        # current / last-good → generations/<gen>
+        assert (home_packages / "generic" / "current").resolve() == gen.resolve()
+        assert (home_packages / "generic" / "last-good").resolve() == gen.resolve()
+
+        # 代 env 冒烟：导入源是 gen env 内真实包（不经 current 段——.pth 语义已退役）
+        py = gen / "env" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        cp = subprocess.run(
+            [str(py), "-c", "import ghrah.core; print(ghrah.core.__file__)"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        src = cp.stdout.strip()
+        assert "site-packages" in src and str(gen) in src, (
+            f"导入源应落代 env 内（wheel 平铺）: {src}"
+        )
+        assert "current" not in src and "versions" not in src
+        bin_dir = "Scripts" if os.name == "nt" else "bin"
+        suffix = ".exe" if os.name == "nt" else ""
+        assert (gen / "env" / ".venv" / bin_dir / f"ghrah-subject-server{suffix}").is_file()
+
+        # webui：env/node 物化 + @ghrah/* 经 file: 可解析
+        node = gen / "env" / "node"
+        assert (node / "node_modules").is_dir()
+        lock = node / "pnpm-lock.yaml"
+        assert lock.is_file(), "pnpm install 未固化 lock（同代复用零解析的前提）"
+
+        # 枚举面：代条目 commit = GENERATION base_commit
         entries = mgr.list_entries()
-        assert [e.commit for e in entries] == [entry.commit]
+        gens = [e for e in entries if e.kind == "generation"]
+        assert [e.commit for e in gens] == [entry.commit]
 
-        # 同 commit 二次 install：复用（零重建）
+        # 同 commit 二次 install：基座 + 代双层复用（零重建零物化）
+        fp = gen / FINGERPRINT_NAME
+        fp_mtime = fp.stat().st_mtime_ns
         second = mgr.ensure(distro="generic", gate="basic", source=f"commit:{entry.commit}")
         assert second.version == entry.version
         assert second.path == entry.path
+        assert fp.stat().st_mtime_ns == fp_mtime
         from ghrah_bootloader.layout import DistroLayout
 
-        assert DistroLayout(root=home_packages / "generic").list_versions() == [entry.version]
+        layout = DistroLayout(root=home_packages / "generic")
+        assert layout.list_versions() == [entry.version]
+        assert layout.list_generations() == [entry.version]
+
+    def test_ip2_switch_between_commits_generation_lifecycle(
+        self, home_packages: Path, repo: Path
+    ) -> None:
+        """I-P2：A → B → A 三次 install；第三次基座 + 代双层复用；current 终值 = A 代。"""
+        _require("uv", "pnpm", "git")
+        new_commit = self_commit(repo)
+        prev = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD~1"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        mgr = RuntimeRefManager(root=home_packages, repo=repo)
+        a = mgr.ensure(distro="generic", gate="basic", source=f"commit:{prev}")
+        b = mgr.ensure(distro="generic", gate="basic", source=f"commit:{new_commit}")
+        assert a.version != b.version, "双 commit 应落不同版本名（同月短 sha 后缀）"
+        assert (home_packages / "generic" / "generations" / b.version).is_dir()
+
+        again = mgr.ensure(distro="generic", gate="basic", source=f"commit:{prev}")
+        assert again.version == a.version
+        assert again.path == a.path  # A 代复用
+        current = (home_packages / "generic" / "current").resolve()
+        assert current == (home_packages / "generic" / "generations" / a.version).resolve()

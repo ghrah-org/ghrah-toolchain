@@ -185,11 +185,21 @@ class DistroLayout:
     def versions(self) -> Path:
         return self.root / "versions"
 
+    @property
+    def generations(self) -> Path:
+        return self.root / "generations"
+
     def list_versions(self) -> list[str]:
         """列出已安装版本目录名（排序；目录不存在返回空）。"""
         if not self.versions.is_dir():
             return []
         return sorted(p.name for p in self.versions.iterdir() if p.is_dir())
+
+    def list_generations(self) -> list[str]:
+        """列出已物化组合代目录名（排序；目录不存在返回空）。"""
+        if not self.generations.is_dir():
+            return []
+        return sorted(p.name for p in self.generations.iterdir() if p.is_dir())
 
 
 def list_distros(root: Path | None = None) -> list[str]:
