@@ -59,7 +59,22 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path) -> Path:
     monkeypatch.delenv("GHRAH_MONOREPO_ROOT", raising=False)
     monkeypatch.setenv("GHRAH_REF_SOURCE", f"commit:{self_commit(repo)}")
     h.mkdir(parents=True)
-    return h
+    yield h
+    # install 用例在 h 下真实 `git worktree add`——pytest 清 tmp 只删目录，
+    # 不删源仓 .git/worktrees/ 元数据（残留会累积成僵尸记录，旧 tmp 未过期
+    # 时连 prune 都无法回收）。teardown 显式 remove + prune。
+    for wt in sorted(h.glob("*/versions/*")):
+        if (wt / ".git").is_file():  # worktree 标记文件（非主仓 .git 目录）
+            subprocess.run(
+                ["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                capture_output=True,
+                check=False,
+            )
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "prune"],
+        capture_output=True,
+        check=False,
+    )
 
 
 def self_commit(repo: Path) -> str:

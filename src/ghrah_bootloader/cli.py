@@ -16,11 +16,13 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 
 from ghrah_bootloader import __version__
 from ghrah_bootloader.adopt import adopt as adopt_legacy
 from ghrah_bootloader.adopt import detect_legacy
 from ghrah_bootloader.boot import resolve_boot_target, run_boot, stop_boot_session
+from ghrah_bootloader.build import build_artifacts, verify_artifacts
 from ghrah_bootloader.errors import BootloaderError, RuntimeRefError
 from ghrah_bootloader.layout import (
     BootToml,
@@ -221,6 +223,34 @@ def _cmd_runtime_update(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── build ────────────────────────────────────────────────────
+
+
+def _cmd_build(args: argparse.Namespace) -> int:
+    """构建发行物：源仓候选 commit → wheels/tarballs/observer-web/manifest（不动安装域）。"""
+    repo_arg = args.repo or os.environ.get("GHRAH_MONOREPO_ROOT")
+    if not repo_arg:
+        raise BootloaderError("构建需要 --repo 或 env GHRAH_MONOREPO_ROOT 指定运行时仓路径")
+    repo = Path(repo_arg).expanduser()
+    if not repo.is_dir():
+        raise BootloaderError(f"运行时仓路径不存在: {repo}")
+    source = RefSource.parse(args.ref)
+    commit = RuntimeRefManager()._resolve_candidate(source, fetch=False, repo=repo)  # noqa: SLF001
+    out_dir = Path(args.out).expanduser() if args.out else repo / "dist" / "bootloader" / commit[:7]
+    result = build_artifacts(repo, commit, out_dir=out_dir)
+    print(f"构建完成: {result.out_dir}")
+    print(f"source_commit = {result.source_commit}")
+    print(f"wheels: {', '.join(result.wheels)}")
+    print(f"tarballs: {', '.join(result.tarballs)}")
+    print(f"pins: {result.pins_file}")
+    if args.no_verify:
+        print("（已跳过验证）")
+    else:
+        verify_artifacts(result.out_dir)
+        print("产物验证通过（import 冒烟 + ghrah-subject-server 入口）")
+    return 0
+
+
 # ── boot / stop / doctor ─────────────────────────────────────
 
 
@@ -331,6 +361,17 @@ def _build_parser() -> argparse.ArgumentParser:
     fetch_group.add_argument("--fetch", action="store_true", help="解析候选前 git fetch --all")
     fetch_group.add_argument("--no-fetch", action="store_true", help="禁止 fetch（默认）")
     runtime_update.set_defaults(func=_cmd_runtime_update)
+
+    build = subparsers.add_parser("build", help="从源仓构建发行物（wheels/tarballs/manifest）")
+    build.add_argument("--repo", help="运行时仓路径（覆盖 env GHRAH_MONOREPO_ROOT）")
+    build.add_argument("--ref", help="签出源（latest | branch:<n> | commit:<sha>），缺省 latest")
+    build.add_argument("--out", help="产物目录（缺省 <repo>/dist/bootloader/<short7>/）")
+    build.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="跳过构建后验证（缺省构建成功即跑 import 冒烟 + 入口校验）",
+    )
+    build.set_defaults(func=_cmd_build)
 
     boot = subparsers.add_parser(
         "boot", aliases=["start", "webui"], help="引导发行版（spawn OS + 前端子进程）"

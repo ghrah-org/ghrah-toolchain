@@ -29,3 +29,7 @@ class SnapshotError(BootloaderError):
 
 class AdoptError(BootloaderError):
     """旧数据认领失败（守卫拒绝或移动中断已回搬）。"""
+
+
+class BuildError(BootloaderError):
+    """发行物构建/验证失败（子进程失败、产物不完整或校验不过）。"""

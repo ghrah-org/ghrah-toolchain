@@ -113,6 +113,18 @@ ghrah-bootloader distro list    # 发行版与版本清单（读 GPT）
 ghrah-bootloader doctor         # 布局 / default / current commit / 落后情况
 ```
 
+### 7. 构建发行物（包管理化 B1）
+
+```bash
+ghrah-bootloader build --repo <monorepo> [--ref latest|branch:<n>|commit:<sha>] [--out <dir>]
+```
+
+从源仓固定 commit 构建发行物树（wheels / tarballs / observer-web /
+manifest.json / BOOTSTRAP.toml），构建成功默认自动验证（sha256 完整性 +
+全新 venv 装配 + import 冒烟 + entry point 存在性，`--no-verify` 跳过）。
+产物目录缺省 `<repo>/dist/bootloader/<short7>/`。本命令只做构建侧，
+不触碰安装域（基座物化属 B2）。
+
 ## 平台支持
 
 | 平台 | 状态 |
