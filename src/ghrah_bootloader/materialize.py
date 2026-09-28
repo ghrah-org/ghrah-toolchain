@@ -320,14 +320,19 @@ def _uv_env(distro_root: Path) -> dict[str, str]:
 
 
 def _install_python_env(distro_root: Path, base_tree: Path, venv: Path) -> None:
-    """``uv venv`` + ``uv pip install`` 基座 wheels + pins 平铺（安装期零解析）。"""
+    """``uv venv`` + ``uv pip install`` 基座 wheels + pins 平铺（安装期零解析）。
+
+    ``--relocatable``：代目录经 staging + ``os.replace`` 改名落位——绝对路径
+    shebang 会钉死 staging 名（改名后入口全部失效）；relocatable 形态的入口
+    脚本为自定位 wrapper（``#!/bin/sh`` + 相对解析），改名后照常执行。
+    """
     wheels = sorted((base_tree / "wheels").glob("*.whl"))
     if not wheels:
         raise MaterializeError(f"基座产物树无 wheels: {base_tree}")
     pins = base_tree / "wheels" / "pins.txt"
     if not pins.is_file():
         raise MaterializeError(f"基座产物树无 pins.txt: {base_tree}")
-    _run(["uv", "venv", str(venv)], env=_uv_env(distro_root))
+    _run(["uv", "venv", "--relocatable", str(venv)], env=_uv_env(distro_root))
     py = _venv_python(venv)
     cmd = ["uv", "pip", "install", f"--python={py}"]
     cmd += [str(w) for w in wheels]

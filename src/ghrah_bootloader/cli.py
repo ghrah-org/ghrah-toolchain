@@ -282,6 +282,8 @@ def _cmd_boot(args: argparse.Namespace) -> int:
     """引导：解析目标 →（救援：恢复快照/重指）→ spawn OS（+ 前端）→ 监督。"""
     if args.restore_snapshot and args.ref != "last-good":
         raise BootloaderError("--restore-snapshot 需配合 --ref last-good（数据回滚救援）")
+    if args.no_webui and (args.webui_dev or args.webui_dev_dir):
+        raise BootloaderError("--no-webui 与 --webui-dev/--webui-dev-dir 互斥")
     target = resolve_boot_target(args.distro, args.version, ref=args.ref)
     return asyncio.run(
         run_boot(
@@ -290,6 +292,8 @@ def _cmd_boot(args: argparse.Namespace) -> int:
             no_browser=args.no_browser,
             restore_snapshot=args.restore_snapshot,
             yes=args.yes,
+            webui_dev=args.webui_dev,
+            webui_dev_dir_arg=args.webui_dev_dir,
         )
     )
 
@@ -419,7 +423,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="恢复最近数据快照并重指 current 到 last-good（损失快照后写入窗口）",
     )
     boot.add_argument("--yes", action="store_true", help="跳过恢复前二次确认（非交互必须）")
-    boot.add_argument("--no-webui", action="store_true", help="不启动前端子进程")
+    boot.add_argument("--no-webui", action="store_true", help="不启动前端（也无浏览器）")
+    boot.add_argument(
+        "--webui-dev",
+        action="store_true",
+        help="前端走 pnpm dev 开发域源码树（默认静态 serve 基座产物 dist）",
+    )
+    boot.add_argument(
+        "--webui-dev-dir",
+        help="开发域源码树的 observer-web 包目录（缺省经 distro.toml [distro.repo].path 推导）",
+    )
     boot.add_argument("--no-browser", action="store_true", help="不打开浏览器")
     boot.set_defaults(func=_cmd_boot)
 

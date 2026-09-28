@@ -2,13 +2,16 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""boot 编排：解析引导目标 → 组装 OS/前端子进程 spawn 计划 → 监督与收束。
+"""boot 编排：解析引导目标 → 组装 OS/前端（代内入口 + 静态 serve）→ 监督与收束。
 
-- OS 进程命令取发行版 env（``env/.venv/bin/ghrah-subject-server``），
-  ``cwd`` 为 ``current/`` 稳定路径；数据面五项 + 端口全量 env 注入，
-  指向发行版数据盘（版本无关，不落任何版本的默认位）。
-- 引导器不 import ghrah：OS 的 ``ghrah.*`` 全部来自发行版 env（其 ``.pth``
-  指向 ``current/``，重指即切换导入源）。
+- OS 入口经 ``current`` 进代（``current/env/.venv/bin/ghrah-subject-server``）；
+  ``current`` 下无代内 env 时过渡兜底用发行级 ``env/.venv``（显式告警，
+  4.4 退役）。OS ``cwd`` 为 ``current/`` 稳定路径；数据面五项 + 端口全量 env
+  注入，指向发行版数据盘（版本无关，不落任何版本的默认位）。
+- webui 默认静态 serve 基座产物 dist（代目标：``versions/<base>/observer-web/dist``，
+  index.html 响应注入 WS URL）；过渡期 versions 树目标沿用 pnpm dev（经
+  ``current`` 拼包路径）；``--webui-dev`` 显式走开发域源码树。
+- 引导器不 import ghrah：OS 的 ``ghrah.*`` 全部来自代内 env。
 - 救援：``--ref last-good`` 取 last-good 符号链接（缺失回退
   ``boot.toml.last_good``）并重指 ``current``；``--restore-snapshot``
   先恢复最近快照（二次确认）再重指启动。
@@ -41,6 +44,7 @@ from ghrah_bootloader.layout import (
     resolve_data_root,
 )
 from ghrah_bootloader.lifecycle import DEFAULT_HOST, BootStack, StackConfig, port_in_use
+from ghrah_bootloader.materialize import read_generation
 from ghrah_bootloader.runtime_ref import (
     _pid_alive,
     acquire_distro_lock,
@@ -56,8 +60,11 @@ __all__ = [
     "os_server_command",
     "resolve_boot_target",
     "resolve_data_root",
+    "resolve_os_server",
     "run_boot",
     "stop_boot_session",
+    "webui_dev_dir",
+    "webui_static_root",
 ]
 
 logger = logging.getLogger(__name__)
@@ -130,15 +137,80 @@ class BootTarget:
         return f"{self.distro}/{self.version}"
 
 
-def os_server_command(venv: Path) -> list[str]:
-    """OS 进程命令：发行版 venv 的 ``ghrah-subject-server`` 入口。"""
+def os_server_entry(venv: Path) -> Path:
+    """OS 入口路径（``ghrah-subject-server``；不做存在性校验）。"""
     if os.name == "nt":
-        server = venv / "Scripts" / "ghrah-subject-server.exe"
-    else:
-        server = venv / "bin" / "ghrah-subject-server"
+        return venv / "Scripts" / "ghrah-subject-server.exe"
+    return venv / "bin" / "ghrah-subject-server"
+
+
+def os_server_command(venv: Path) -> list[str]:
+    """OS 进程命令：给定 venv 的 ``ghrah-subject-server`` 入口（纯 venv→命令助手）。"""
+    server = os_server_entry(venv)
     if not server.is_file():
         raise BootloaderError(f"OS server 入口缺失: {server}（发行版 env 未物化，请先完成安装）")
     return [str(server)]
+
+
+def resolve_os_server(layout: DistroLayout) -> list[str]:
+    """OS 入口解析序：``current/env/.venv``（代内 per-gen env）优先，发行级 env 兜底过渡。
+
+    - ``current/env/.venv`` 有入口 → 用代内 env（B4 终态）；
+    - 缺失且发行级 ``env/.venv`` 有入口 → 显式告警降级用旧入口（过渡兜底，4.4 删）；
+    - 两者皆缺 → 报「发行版 env 未物化」。
+    """
+    gen_venv = layout.current / "env" / ".venv"
+    if os_server_entry(gen_venv).is_file():
+        return os_server_command(gen_venv)
+    if os_server_entry(layout.venv).is_file():
+        logger.warning(
+            "current 下无代内 env OS 入口（%s），过渡兜底用发行级 env: %s（4.4 退役）",
+            gen_venv,
+            layout.venv,
+        )
+        return os_server_command(layout.venv)
+    raise BootloaderError(
+        f"OS server 入口缺失: {gen_venv} 与发行级 {layout.venv} 均无 ghrah-subject-server"
+        "（发行版 env 未物化，请先完成安装）"
+    )
+
+
+def webui_static_root(target: BootTarget) -> Path | None:
+    """静态 serve 根：代目标 → 基座树 ``versions/<base>/observer-web/dist``。
+
+    非代目标（过渡期 versions 树）返回 ``None``（调用方沿用旧 pnpm dev 路径）；
+    代目标 dist 缺失 → fail-closed（基座产物不完整）。
+    """
+    info = read_generation(target.tree)
+    if info is None:
+        return None
+    dist = target.layout.versions / info.base_version / "observer-web" / "dist"
+    if not dist.is_dir():
+        raise BootloaderError(
+            f"基座产物不完整: {dist} 缺失（observer-web dist）；重新 install 修复基座树"
+        )
+    return dist
+
+
+def webui_dev_dir(target: BootTarget, dev_dir_arg: str | Path | None) -> Path:
+    """``--webui-dev`` 开发域目录：显式参 > ``[distro.repo].path`` 推导；均无效 fail-closed。"""
+    if dev_dir_arg is not None:
+        dev_dir = Path(dev_dir_arg).expanduser()
+        if not dev_dir.is_dir():
+            raise BootloaderError(
+                f"--webui-dev-dir 无效: {dev_dir} 不是目录；"
+                "应指向开发域源码树的 observer-web 包目录"
+            )
+        return dev_dir
+    repo_path = target.distro_toml.repo_path
+    if repo_path:
+        dev_dir = Path(repo_path).expanduser().joinpath(*_WEBUI_PACKAGE_RELPATH)
+        if dev_dir.is_dir():
+            return dev_dir
+    raise BootloaderError(
+        "开发域路径不可用：提供 --webui-dev-dir（开发域源码树的 observer-web 包目录），"
+        "或在 distro.toml [distro.repo].path 配置有效源仓路径"
+    )
 
 
 def _within_managed_segment(layout: DistroLayout, tree: Path) -> bool:
@@ -245,18 +317,23 @@ async def run_boot(
     stop_event: asyncio.Event | None = None,
     restore_snapshot: bool = False,
     yes: bool = False,
+    webui_dev: bool = False,
+    webui_dev_dir_arg: str | Path | None = None,
 ) -> int:
     """引导并监督：物化数据盘 → spawn OS（+ 前端）→ 健康检查 → 运行至停止。
 
     Args:
         target: ``resolve_boot_target`` 的解析结果。
-        no_webui: 不启动前端子进程（也无浏览器）。
+        no_webui: 不启动前端（也无浏览器）。
         no_browser: 不打开浏览器。
         subject_port / webui_port: 端口覆盖（默认取 distro.toml）。
         stop_event: 外部停止信号（默认自建，并接管 SIGINT/SIGTERM）。
         restore_snapshot: 救援数据回滚——恢复最近快照并重指 ``current``
             到引导目标版本（要求目标经 ``--ref last-good`` 解析）。
         yes: 跳过恢复前的交互二次确认（非交互 stdin 时必须提供）。
+        webui_dev: 前端走 pnpm dev 开发域（默认按目标形态：代目标静态
+            serve 基座 dist；过渡期 versions 树沿用旧 dev 路径）。
+        webui_dev_dir_arg: 开发域目录（显式 > ``[distro.repo].path`` 推导）。
 
     Returns:
         0：停止信号收到并完成逆序收束；1：OS 子进程意外退出（其余已收束）。
@@ -284,15 +361,25 @@ async def run_boot(
         _ENV_SERVER_HOST: config.host,
         _ENV_SERVER_PORT: str(sport),
     }
-    webui_dir = None
+    # 形态判定装配（D5）：--webui-dev 显式走开发域；代目标静态 serve 基座 dist
+    # （D2 根 + D3 WS 注入）；过渡期 versions 树目标沿用旧 dev 路径（4.4 删）。
+    webui_kwargs: dict[str, object] = {}
     if not no_webui:
-        webui_dir = target.layout.current.joinpath(*_WEBUI_PACKAGE_RELPATH)
+        if webui_dev or webui_dev_dir_arg is not None:
+            webui_kwargs["webui_dir"] = webui_dev_dir(target, webui_dev_dir_arg)
+        else:
+            static_root = webui_static_root(target)
+            if static_root is not None:
+                webui_kwargs["webui_static_root"] = static_root
+                webui_kwargs["webui_ws_url"] = config.subject_ws_url()
+            else:
+                webui_kwargs["webui_dir"] = target.layout.current.joinpath(*_WEBUI_PACKAGE_RELPATH)
     stack = BootStack(
         config,
-        os_command=os_server_command(target.layout.venv),
+        os_command=resolve_os_server(target.layout),
         os_cwd=target.layout.current,
         os_env=os_env,
-        webui_dir=webui_dir,
+        **webui_kwargs,
     )
     logger.info(
         "boot %s @ %s (tree=%s data=%s os_port=%d)",

@@ -11,11 +11,13 @@
 - stop() 幂等与端口复核
 - OS 子进程 spawn/收束（新增：out-of-process 语义）
 - wait_for_server（stdlib urllib 轮询）
+- webui 静态 serve（B4 4.2：起/停/幂等、index 注入、资产服务/目录钉根、端口占用拒绝）
 """
 
 from __future__ import annotations
 
 import asyncio
+import http.client
 import logging
 import os
 import signal
@@ -23,6 +25,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -37,6 +40,12 @@ from ghrah_bootloader.lifecycle import (
     port_in_use,
     terminate_process,
 )
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def test_config_default_ports() -> None:
@@ -219,7 +228,9 @@ def test_ensure_pnpm_missing_raises() -> None:
 
 
 def test_webui_start_missing_dir_raises(tmp_path: Path) -> None:
-    stack = BootStack(StackConfig(open_browser=False), webui_dir=tmp_path / "nope")
+    stack = BootStack(
+        StackConfig(open_browser=False, webui_port=_free_port()), webui_dir=tmp_path / "nope"
+    )
     with patch("ghrah_bootloader.lifecycle.shutil.which", return_value="/usr/bin/pnpm"):
         with pytest.raises(RuntimeError, match="observer-web package not found"):
             stack._start_webui()
@@ -472,3 +483,136 @@ def test_start_webui_posix_uses_bare_pnpm(tmp_path: Path, monkeypatch: pytest.Mo
     cmd = popen_calls[0]["cmd"]
     assert cmd == ["pnpm", "dev", "--port", str(stack.config.webui_port), "--strictPort"]
     assert popen_calls[0]["start_new_session"] is True
+
+
+# ── webui 静态 serve（B4 4.2：L1-L4） ────────────────────────
+
+
+def _make_fake_dist(tmp_path: Path) -> Path:
+    """最小 dist：index.html（含 module script）+ 一份静态资产。"""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text(
+        "<!doctype html>\n<html>\n<head>\n"
+        '<script type="module" src="/assets/app.js"></script>\n'
+        '</head>\n<body><div id="app"></div></body>\n</html>\n',
+        encoding="utf-8",
+    )
+    (dist / "assets" / "app.js").write_text("console.log('app')\n", encoding="utf-8")
+    return dist
+
+
+def _make_static_stack(dist: Path, port: int, ws_url: str = "ws://127.0.0.1:4112/ws") -> BootStack:
+    return BootStack(
+        StackConfig(open_browser=False, webui_port=port),
+        webui_static_root=dist,
+        webui_ws_url=ws_url,
+    )
+
+
+def _http_get(port: int, path: str) -> tuple[http.client.HTTPResponse, str]:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5.0)
+    conn.request("GET", path)
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8")
+    conn.close()
+    return resp, body
+
+
+async def _wait_port_released(port: int, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while port_in_use("127.0.0.1", port):
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.1)
+    return True
+
+
+async def test_static_webui_start_stop_idempotent(tmp_path: Path) -> None:
+    """L1：静态 server 起 → stop() 释放端口 → 再 stop() 不抛。"""
+    dist = _make_fake_dist(tmp_path)
+    port = _free_port()
+    stack = _make_static_stack(dist, port)
+    stack._start_webui_static()
+    assert port_in_use("127.0.0.1", port)
+    await stack.stop()
+    assert await _wait_port_released(port)
+    await stack.stop()  # 幂等
+
+
+async def test_static_webui_index_injection(tmp_path: Path) -> None:
+    """L2：index.html 注入 WS URL（先于首个 module script）+ Cache-Control: no-store。"""
+    dist = _make_fake_dist(tmp_path)
+    port = _free_port()
+    ws_url = "ws://127.0.0.1:4112/ws"
+    stack = _make_static_stack(dist, port, ws_url=ws_url)
+    stack._start_webui_static()
+    try:
+        resp, body = _http_get(port, "/")
+        assert resp.status == 200
+        assert f'window.__GHRAH_SUBJECT_WS_URL__="{ws_url}"' in body
+        assert body.find("__GHRAH_SUBJECT_WS_URL__") < body.find('type="module"')
+        assert resp.getheader("Cache-Control") == "no-store"
+    finally:
+        await stack.stop()
+
+
+async def test_static_webui_assets_404_and_root_pinned(tmp_path: Path) -> None:
+    """L3：静态资产 200 + 正确 MIME；缺失 404；目录钉根（../ 逃逸不出 dist）。"""
+    dist = _make_fake_dist(tmp_path)
+    (tmp_path / "secret.txt").write_text("top-secret", encoding="utf-8")
+    port = _free_port()
+    stack = _make_static_stack(dist, port)
+    stack._start_webui_static()
+    try:
+        resp, _ = _http_get(port, "/assets/app.js")
+        assert resp.status == 200
+        assert "javascript" in (resp.getheader("Content-Type") or "")
+        resp, _ = _http_get(port, "/missing.js")
+        assert resp.status == 404
+        resp, body = _http_get(port, "/../secret.txt")
+        assert resp.status == 404
+        assert "top-secret" not in body
+    finally:
+        await stack.stop()
+
+
+async def test_static_webui_port_in_use_raises(tmp_path: Path) -> None:
+    """L4：端口被预占 → RuntimeError（对齐 dev 面 _check_port_free）。"""
+    dist = _make_fake_dist(tmp_path)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        stack = _make_static_stack(dist, port)
+        with pytest.raises(RuntimeError, match="already in use"):
+            stack._start_webui_static()
+
+
+def test_static_handler_ws_url_default_from_config(tmp_path: Path) -> None:
+    """静态面 ws_url 缺省取 StackConfig.subject_ws_url（OS 端口覆盖随行）。"""
+    from ghrah_bootloader.lifecycle import _inject_ws_url, _make_static_handler
+
+    handler = _make_static_handler(tmp_path, "ws://127.0.0.1:4222/ws")
+    assert handler is not None
+    html = '<html><head><script type="module" src="/a.js"></script></head></html>'
+    injected = _inject_ws_url(html, "ws://127.0.0.1:4222/ws")
+    assert injected.index("__GHRAH_SUBJECT_WS_URL__") < injected.index('type="module"')
+    # 无 head/script 兜底：前置注入
+    assert _inject_ws_url("<html></html>", "ws://x/ws").startswith("<script>")
+
+
+def test_boot_stack_webui_dir_and_static_mutually_exclusive(tmp_path: Path) -> None:
+    """BootStack：webui_dir 与 webui_static_root/webui_ws_url 互斥（同时给报错）。"""
+    with pytest.raises(RuntimeError, match="互斥"):
+        BootStack(
+            StackConfig(open_browser=False),
+            webui_dir=tmp_path,
+            webui_static_root=tmp_path,
+        )
+    with pytest.raises(RuntimeError, match="互斥"):
+        BootStack(
+            StackConfig(open_browser=False),
+            webui_dir=tmp_path,
+            webui_ws_url="ws://127.0.0.1:4112/ws",
+        )

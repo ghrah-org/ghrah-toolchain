@@ -322,3 +322,92 @@ class TestInstallPackagesMode:
         assert again.path == a.path  # A 代复用
         current = (home_packages / "generic" / "current").resolve()
         assert current == (home_packages / "generic" / "generations" / a.version).resolve()
+
+
+class TestBootGeneration:
+    """B4 I-P3：packages 域真实 boot 全链路（真实构建，分钟级）。
+
+    - ``boot --no-webui``：OS 经 ``current/env/.venv`` 的真实
+      ``ghrah-subject-server`` 拉起（健康检查真实通过）→ stop 端口释放；
+    - ``boot``：webui 静态 serve 真实 dist 探活 + index WS 注入断言 → stop 端口释放。
+    """
+
+    @staticmethod
+    def _free_port() -> int:
+        import socket as _socket
+
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    @staticmethod
+    async def _wait_port(port: int, *, listening: bool, timeout: float) -> None:
+        import asyncio as _asyncio
+        import time as _time
+
+        from ghrah_bootloader.lifecycle import port_in_use
+
+        deadline = _time.monotonic() + timeout
+        while port_in_use("127.0.0.1", port) != listening:
+            assert _time.monotonic() < deadline, (
+                f"port {port} not {'listening' if listening else 'released'} in {timeout}s"
+            )
+            await _asyncio.sleep(0.5)
+
+    async def test_ip3_boot_os_gen_env_and_static_webui(
+        self, home_packages: Path, repo: Path
+    ) -> None:
+        import asyncio as _asyncio
+        import http.client as _http
+
+        from ghrah_bootloader.boot import resolve_boot_target, run_boot
+
+        _require("uv", "pnpm", "git")
+        mgr = RuntimeRefManager(root=home_packages, repo=repo)
+        entry = mgr.ensure(distro="generic", gate="basic", source=f"commit:{self_commit(repo)}")
+        target = resolve_boot_target("generic", None, root=home_packages)
+        assert target.tree == entry.path.resolve()
+
+        # --no-webui：OS 经代内 env 真实拉起（健康检查过）→ stop 端口释放
+        sport = self._free_port()
+        stop = _asyncio.Event()
+        task = _asyncio.create_task(
+            run_boot(target, no_webui=True, no_browser=True, subject_port=sport, stop_event=stop)
+        )
+        try:
+            await self._wait_port(sport, listening=True, timeout=60.0)
+        finally:
+            stop.set()
+            code = await _asyncio.wait_for(task, timeout=30.0)
+        assert code == 0
+        await self._wait_port(sport, listening=False, timeout=5.0)
+
+        # 全栈：webui 静态 serve 真实 dist + index WS 注入 → stop 端口释放
+        wport = self._free_port()
+        sport2 = self._free_port()
+        stop2 = _asyncio.Event()
+        task2 = _asyncio.create_task(
+            run_boot(
+                target,
+                no_browser=True,
+                subject_port=sport2,
+                webui_port=wport,
+                stop_event=stop2,
+            )
+        )
+        try:
+            await self._wait_port(wport, listening=True, timeout=60.0)
+            conn = _http.HTTPConnection("127.0.0.1", wport, timeout=10.0)
+            conn.request("GET", "/")
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8")
+            conn.close()
+            assert resp.status == 200
+            assert f'window.__GHRAH_SUBJECT_WS_URL__="ws://127.0.0.1:{sport2}/ws"' in body, (
+                f"WS URL 注入缺失: {body[:200]}"
+            )
+        finally:
+            stop2.set()
+            code2 = await _asyncio.wait_for(task2, timeout=30.0)
+        assert code2 == 0
+        await self._wait_port(wport, listening=False, timeout=5.0)

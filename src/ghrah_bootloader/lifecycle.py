@@ -2,12 +2,15 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""进程生命周期管理：spawn OS 子进程 + 前端子进程 + 逆序收束。
+"""进程生命周期管理：spawn OS 子进程 + 前端（dev 子进程 / 静态线程）+ 逆序收束。
 
 - ``_port_in_use``（loopback 双栈）、``_terminate_process``（POSIX 进程组
   SIGTERM→SIGKILL / Windows taskkill /T）、``_start_webui``（``pnpm dev
   --strictPort``、``.env.local`` 注入 ``VITE_GHRAH_SUBJECT_WS_URL``）、
   ``_wait_webui_ready``、``_wait_webui_port_released``、``_open_browser``。
+- ``_start_webui_static``（静态 serve）：``ThreadingHTTPServer`` + daemon 线程，
+  目录钉 dist 根；``index.html`` 响应注入 ``window.__GHRAH_SUBJECT_WS_URL__``
+  + ``Cache-Control: no-store``；``stop()`` 为 ``shutdown()`` + 端口释放复核。
 - 删除：内嵌 Subject 装配（``_run_subject_server`` / ``_start_subject``）——
   Subject（OS）改为 ``spawn_os_process`` 拉起的独立子进程（out-of-process 硬要求）。
 - ``stop()`` 逆序语义与幂等；``asyncio.shield(stop())`` 收口模式由调用方使用。
@@ -22,8 +25,10 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from ghrah_bootloader.health import wait_for_server
@@ -36,6 +41,64 @@ DEFAULT_WEBUI_PORT = 5173
 DEFAULT_HOST = "127.0.0.1"
 _WEBUI_ENV_FILE = ".env.local"
 _WEBUI_ENV_KEY = "VITE_GHRAH_SUBJECT_WS_URL"
+_WS_URL_GLOBAL = "__GHRAH_SUBJECT_WS_URL__"
+
+
+def _ws_url_inject_script(ws_url: str) -> str:
+    """静态 serve 的 WS URL 注入 script 标签（D3：先于首个 module script 执行）。"""
+    escaped = ws_url.replace('"', '\\"')
+    return f'<script>window.{_WS_URL_GLOBAL}="{escaped}";</script>'
+
+
+def _inject_ws_url(html: str, ws_url: str) -> str:
+    """把注入 script 放进 HTML：``<head>`` 开标签后优先（保证先于 head 内全部
+    module script），其次首个 ``<script`` 前，兜底前置。"""
+    script = _ws_url_inject_script(ws_url)
+    lowered = html.lower()
+    head_at = lowered.find("<head")
+    if head_at >= 0:
+        close = html.find(">", head_at)
+        if close >= 0:
+            return html[: close + 1] + script + html[close + 1 :]
+    script_at = lowered.find("<script")
+    if script_at >= 0:
+        return html[:script_at] + script + html[script_at:]
+    return script + html
+
+
+def _make_static_handler(dist_root: Path, ws_url: str) -> type[SimpleHTTPRequestHandler]:
+    """静态 webui handler 工厂：目录钉 dist 根；index.html 注入 WS URL + no-store。"""
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs) -> None:
+            kwargs["directory"] = str(dist_root)
+            super().__init__(*args, **kwargs)
+
+        def do_GET(self) -> None:  # noqa: N802 - http.server 约定
+            path = self.path.partition("?")[0]
+            if path in ("/", "/index.html"):
+                self._serve_index()
+                return
+            super().do_GET()
+
+        def _serve_index(self) -> None:
+            try:
+                html = (dist_root / "index.html").read_text(encoding="utf-8")
+            except OSError:
+                self.send_error(404, "index.html missing in dist root")
+                return
+            body = _inject_ws_url(html, ws_url).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args) -> None:  # noqa: A002 - 父类签名
+            del format, args
+
+    return Handler
 
 
 def port_in_use(host: str, port: int) -> bool:
@@ -142,11 +205,14 @@ class StackConfig:
 
 
 class BootStack:
-    """OS 子进程 + webui 子进程的生命周期管理。
+    """OS 子进程 + webui（dev 子进程 / 静态线程）的生命周期管理。
 
     - OS（Subject + 内嵌 Core）：经 ``spawn_os_process`` 以发行版 env 的
       ``ghrah-subject-server`` 独立进程拉起（引导器不 import ghrah）。
     - webui dev server：``subprocess.Popen``（pnpm dev --strictPort）。
+    - webui 静态 serve：``ThreadingHTTPServer`` + daemon 线程（stdlib，目录钉
+      dist 根；index.html 注入 WS URL）；``webui_dir`` 与
+      ``webui_static_root/webui_ws_url`` 互斥。
 
     所有资源在 ``stop()`` 中逆序释放（webui → OS）；重复 ``stop()`` 幂等；
     未 ``start()`` 即 ``stop()`` 不抛。
@@ -160,15 +226,23 @@ class BootStack:
         os_cwd: Path | None = None,
         os_env: dict[str, str] | None = None,
         webui_dir: Path | None = None,
+        webui_static_root: Path | None = None,
+        webui_ws_url: str | None = None,
     ) -> None:
+        if webui_dir is not None and (webui_static_root is not None or webui_ws_url is not None):
+            raise RuntimeError("webui_dir 与 webui_static_root/webui_ws_url 互斥（同时给定）")
         self._config = config
         self._os_command = os_command
         self._os_cwd = os_cwd
         self._os_env = os_env
         self._webui_dir = webui_dir
+        self._webui_static_root = webui_static_root
+        self._webui_ws_url = webui_ws_url
         self._os_process: subprocess.Popen[bytes] | None = None
         self._webui_process: subprocess.Popen[bytes] | None = None
         self._webui_env_file: Path | None = None
+        self._webui_static_server: ThreadingHTTPServer | None = None
+        self._webui_static_thread: threading.Thread | None = None
         self._started = False
 
     @property
@@ -186,10 +260,12 @@ class BootStack:
         return self._config.webui_url()
 
     async def start(self) -> None:
-        """起 OS 子进程 → webui 子进程。任一层失败抛异常（已起的资源由 stop 释放）。"""
+        """起 OS → 前端（dev 子进程 / 静态线程）。任一层失败抛异常（已起资源由 stop 释放）。"""
         await self._start_os()
         if self._webui_dir is not None:
             self._start_webui()
+        elif self._webui_static_root is not None:
+            self._start_webui_static()
         self._started = True
         if self._config.open_browser:
             self._open_browser()
@@ -199,6 +275,9 @@ class BootStack:
         if self._webui_process is not None:
             terminate_process(self._webui_process)
             self._webui_process = None
+            await self._wait_webui_port_released()
+        if self._webui_static_server is not None:
+            self._stop_webui_static()
             await self._wait_webui_port_released()
         self._cleanup_webui_env_file()
         if self._os_process is not None:
@@ -356,6 +435,58 @@ class BootStack:
             self._config.webui_port,
         )
         self._wait_webui_ready(self._webui_process)
+
+    # ── webui 静态 serve（B4 4.2） ──
+
+    def _start_webui_static(self) -> None:
+        """静态 serve 基座产物 dist：stdlib http server + daemon 线程。"""
+        root = self._webui_static_root
+        if root is None or not root.is_dir():
+            raise RuntimeError(
+                f"webui static root not found at {root}; ensure the base artifacts are complete"
+            )
+        self._check_port_free(self._config.host, self._config.webui_port, label="webui")
+        handler = _make_static_handler(root, self._webui_ws_url or self._config.subject_ws_url())
+        server = ThreadingHTTPServer((self._config.host, self._config.webui_port), handler)
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name=f"ghrah-webui-static-{self._config.webui_port}",
+            daemon=True,
+        )
+        self._webui_static_server = server
+        self._webui_static_thread = thread
+        thread.start()
+        self._wait_static_ready()
+        logger.info(
+            "WebUI static server ready (port=%d, root=%s)",
+            self._config.webui_port,
+            root,
+        )
+
+    def _wait_static_ready(self, timeout: float = 5.0) -> None:
+        """静态面就绪探活：端口连通即就绪（绑定在构造期同步完成，超时即异常态）。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if port_in_use(self._config.host, self._config.webui_port):
+                return
+            time.sleep(0.1)
+        raise RuntimeError(
+            f"webui static server did not listen on port {self._config.webui_port} "
+            f"within {timeout}s"
+        )
+
+    def _stop_webui_static(self) -> None:
+        """停止静态面：shutdown + join + close；幂等（先摘引用再收束）。"""
+        server = self._webui_static_server
+        thread = self._webui_static_thread
+        self._webui_static_server = None
+        self._webui_static_thread = None
+        if server is None:
+            return
+        server.shutdown()
+        if thread is not None:
+            thread.join(timeout=5.0)
+        server.server_close()
 
     def _open_browser(self) -> None:
         url = self._config.webui_url()

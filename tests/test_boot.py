@@ -523,3 +523,274 @@ def test_resolve_boot_target_ref_last_good_toml_generation(tmp_path: Path) -> No
     target = resolve_boot_target("generic", None, root=tmp_path, ref="last-good")
     assert target.version == "2026.09"
     assert target.tree == gen.resolve()
+
+
+# ── B4 4.1：OS 入口经 current 进代（B1a-B1d） ─────────────────
+
+
+def _server_entry(venv: Path) -> Path:
+    from ghrah_bootloader.boot import os_server_entry
+
+    return os_server_entry(venv)
+
+
+def _make_gen(
+    root: Path, distro: str = "generic", gen: str = "2026.09", base: str = "2026.09"
+) -> DistroLayout:
+    """物化 packages 代形态布局：versions/<base> 基座树 + generations/<gen> 代 + current → 代。"""
+    layout = _make_distro(root, distro=distro, version=base)
+    gen_dir = root / distro / "generations" / gen
+    (gen_dir / "env" / ".venv").mkdir(parents=True)
+    (gen_dir / "GENERATION.toml").write_text(
+        "[generation]\n"
+        "schema_version = 1\n"
+        f'base_version = "{base}"\n'
+        'base_commit = "861ca39"\n'
+        'pins_sha256 = "00000000"\n',
+        encoding="utf-8",
+    )
+    (root / distro / "current").unlink()
+    (root / distro / "current").symlink_to(gen_dir)
+    return layout
+
+
+def test_resolve_os_server_prefers_current_gen_env(tmp_path: Path) -> None:
+    """B1a：代目标 OS 入口 = current/env/.venv（发行级入口在场仍取代内）。"""
+    from ghrah_bootloader.boot import resolve_os_server
+
+    layout = _make_gen(tmp_path)
+    gen_entry = _server_entry(layout.current / "env" / ".venv")
+    gen_entry.parent.mkdir(parents=True, exist_ok=True)
+    gen_entry.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    gen_entry.chmod(0o755)
+    cmd = resolve_os_server(layout)
+    assert cmd == [str(gen_entry)]
+
+
+def test_resolve_os_server_falls_back_to_distro_env_with_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """B1b：过渡兜底——current 下无 env、发行级 venv 有入口 → 告警 + 旧路径命令。"""
+    import logging
+
+    from ghrah_bootloader.boot import resolve_os_server
+
+    layout = _make_distro(tmp_path)  # current → versions 树；发行级 venv 有入口
+    with caplog.at_level(logging.WARNING, logger="ghrah_bootloader.boot"):
+        cmd = resolve_os_server(layout)
+    assert cmd == [str(_server_entry(layout.venv))]
+    assert any("过渡兜底" in r.message for r in caplog.records)
+
+
+def test_resolve_os_server_missing_everywhere(tmp_path: Path) -> None:
+    """B1c：双缺失 → 报「发行版 env 未物化」语义等价错误。"""
+    from ghrah_bootloader.boot import resolve_os_server
+    from ghrah_bootloader.errors import BootloaderError
+
+    layout = _make_distro(tmp_path)
+    _server_entry(layout.venv).unlink()
+    with pytest.raises(BootloaderError, match="未物化"):
+        resolve_os_server(layout)
+
+
+_GEN_OS_SCRIPT_TEMPLATE = """
+import threading, time, os, json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+port = int(os.environ["GHRAH_SUBJECT_SERVER_PORT"])
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{"status": "ok"}')
+    def log_message(self, *a):
+        pass
+srv = HTTPServer(("127.0.0.1", port), H)
+t = threading.Thread(target=srv.serve_forever, daemon=True)
+t.start()
+with open(os.environ["BOOT_TEST_ENV_DUMP"], "w") as f:
+    json.dump({"BOOT_TEST_CWD": os.getcwd(), **dict(os.environ)}, f)
+time.sleep(60)
+"""
+
+
+@pytest.fixture
+def gen_distro_with_mock_os(tmp_path: Path):
+    """packages 代形态布局 + 代内 mock OS（current → generations/<gen>，记录 cwd + env）。"""
+    layout = _make_gen(tmp_path)
+    gen_dir = tmp_path / "generic" / "generations" / "2026.09"
+    bin_dir = gen_dir / "env" / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    server = bin_dir / ("ghrah-subject-server.exe" if os.name == "nt" else "ghrah-subject-server")
+    script_path = tmp_path / "os_gen_script.py"
+    script_path.write_text(_GEN_OS_SCRIPT_TEMPLATE, encoding="utf-8")
+    if os.name == "nt":
+        server.write_text("", encoding="utf-8")
+        pytest.skip("POSIX-only end-to-end spawn test")
+    server.write_text(f"#!/bin/sh\nexec {sys.executable} {script_path}\n", encoding="utf-8")
+    server.chmod(0o755)
+    return tmp_path, layout
+
+
+async def test_run_boot_gen_form_env_injection_and_cwd(
+    gen_distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1d：代形态 run_boot 端到端——OS 取代内 env（发行级入口已删）、env 六项、cwd=current。"""
+    root, layout = gen_distro_with_mock_os
+    _server_entry(layout.venv).unlink()  # 兜底不可用：OS 必须来自代内 env
+    dump = tmp_path / "os_gen_env.json"
+    monkeypatch.setenv("BOOT_TEST_ENV_DUMP", str(dump))
+    target = resolve_boot_target("generic", None, root=root)
+    port = _free_port()
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_boot(target, no_webui=True, subject_port=port, stop_event=stop))
+    try:
+        await asyncio.wait_for(_wait_dump(dump), timeout=15.0)
+    finally:
+        stop.set()
+        code = await asyncio.wait_for(task, timeout=15.0)
+    assert code == 0
+
+    import json
+
+    os_env = json.loads(dump.read_text(encoding="utf-8"))
+    data_root = root / "generic" / "data"
+    assert os_env["GHRAH_SUBJECT_DB_PATH"] == str(data_root / "subject.db")
+    assert os_env["GHRAH_SUBJECT_TASKSTORE_DB"] == str(data_root / "taskstore.sqlite3")
+    assert os_env["GHRAH_SUBJECT_MANIFEST_ROOT"] == str(data_root / "manifests")
+    assert os_env["GHRAH_SUBJECT_PROJECT_DEFAULT_ROOT_LOCATOR_TEMPLATE"] == str(
+        data_root / "projects" / "{project_id}"
+    )
+    assert os_env["GHRAH_SUBJECT_WORKSPACE_ROOT"] == str(data_root / "workspace")
+    assert os_env["GHRAH_SUBJECT_SERVER_HOST"] == "127.0.0.1"
+    assert os_env["GHRAH_SUBJECT_SERVER_PORT"] == str(port)
+    assert os_env["BOOT_TEST_CWD"] == str((root / "generic" / "generations" / "2026.09").resolve())
+
+
+# ── B4 4.2：webui 静态 serve / --webui-dev（B2a-B2c） ─────────
+
+
+def test_webui_static_root_gen_target(tmp_path: Path) -> None:
+    """B2a：代目标 → 基座 versions/<base>/observer-web/dist。"""
+    from ghrah_bootloader.boot import webui_static_root
+
+    _make_gen(tmp_path)
+    dist = tmp_path / "generic" / "versions" / "2026.09" / "observer-web" / "dist"
+    dist.mkdir(parents=True)
+    target = resolve_boot_target("generic", None, root=tmp_path)
+    assert webui_static_root(target) == dist
+
+
+def test_webui_static_root_missing_dist_fail_closed(tmp_path: Path) -> None:
+    """B2a：代目标 dist 缺失 → fail-closed 报「基座产物不完整」。"""
+    from ghrah_bootloader.boot import webui_static_root
+    from ghrah_bootloader.errors import BootloaderError
+
+    _make_gen(tmp_path)  # 基座树在场但无 observer-web/dist
+    target = resolve_boot_target("generic", None, root=tmp_path)
+    with pytest.raises(BootloaderError, match="基座产物不完整"):
+        webui_static_root(target)
+
+
+def test_webui_static_root_non_gen_returns_none(tmp_path: Path) -> None:
+    """B2a：非代目标（过渡期 versions 树）→ None（调用方走旧 dev 路径）。"""
+    from ghrah_bootloader.boot import webui_static_root
+
+    _make_distro(tmp_path)
+    target = resolve_boot_target("generic", None, root=tmp_path)
+    assert webui_static_root(target) is None
+
+
+def test_webui_dev_dir_explicit_arg_wins(tmp_path: Path) -> None:
+    """B2b：显式参 > repo 推导。"""
+    from ghrah_bootloader.boot import webui_dev_dir
+
+    _make_distro(tmp_path)
+    dev = tmp_path / "dev-observer-web"
+    dev.mkdir()
+    (tmp_path / "generic" / "distro.toml").write_text(
+        f'[distro]\nname = "generic"\n\n[distro.repo]\npath = "{tmp_path}"\n', encoding="utf-8"
+    )
+    target = resolve_boot_target("generic", None, root=tmp_path)
+    assert webui_dev_dir(target, dev) == dev
+    assert webui_dev_dir(target, str(dev)) == dev
+
+
+def test_webui_dev_dir_repo_derivation(tmp_path: Path) -> None:
+    """B2b：无显式参 → [distro.repo].path + 包路径推导。"""
+    from ghrah_bootloader.boot import webui_dev_dir
+
+    _make_distro(tmp_path)
+    dev = tmp_path / "repo" / "ghrah-observer-webui" / "packages" / "observer-web"
+    dev.mkdir(parents=True)
+    (tmp_path / "generic" / "distro.toml").write_text(
+        f'[distro]\nname = "generic"\n\n[distro.repo]\npath = "{tmp_path / "repo"}"\n',
+        encoding="utf-8",
+    )
+    target = resolve_boot_target("generic", None, root=tmp_path)
+    assert webui_dev_dir(target, None) == dev
+
+
+def test_webui_dev_dir_unavailable_fail_closed(tmp_path: Path) -> None:
+    """B2b：显式参无效 / 均缺 → fail-closed，报错文案含处置提示（--webui-dev-dir）。"""
+    from ghrah_bootloader.boot import webui_dev_dir
+    from ghrah_bootloader.errors import BootloaderError
+
+    _make_distro(tmp_path)  # distro.toml 无 repo 路径
+    target = resolve_boot_target("generic", None, root=tmp_path)
+    with pytest.raises(BootloaderError, match="--webui-dev-dir"):
+        webui_dev_dir(target, None)
+    with pytest.raises(BootloaderError, match="--webui-dev-dir"):
+        webui_dev_dir(target, tmp_path / "nope")
+
+
+async def test_run_boot_static_webui_end_to_end(
+    gen_distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2c：代目标 run_boot → webui 静态 serve 基座 dist + WS 注入；stop 后端口释放。"""
+    import http.client
+
+    from ghrah_bootloader.lifecycle import port_in_use
+
+    root, layout = gen_distro_with_mock_os
+    _server_entry(layout.venv).unlink()  # OS 必须来自代内 env
+    dist = root / "generic" / "versions" / "2026.09" / "observer-web" / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text(
+        "<!doctype html><html><head>"
+        '<script type="module" src="/assets/app.js"></script>'
+        "</head><body></body></html>",
+        encoding="utf-8",
+    )
+    (dist / "assets" / "app.js").write_text("console.log('app')\n", encoding="utf-8")
+    monkeypatch.setenv("BOOT_TEST_ENV_DUMP", str(tmp_path / "os_gen_env.json"))
+    target = resolve_boot_target("generic", None, root=root)
+    sport, wport = _free_port(), _free_port()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run_boot(target, no_browser=True, subject_port=sport, webui_port=wport, stop_event=stop)
+    )
+    try:
+        deadline = asyncio.get_event_loop().time() + 15.0
+        while not port_in_use("127.0.0.1", wport):
+            assert asyncio.get_event_loop().time() < deadline, "静态 webui 未探活"
+            await asyncio.sleep(0.2)
+        conn = http.client.HTTPConnection("127.0.0.1", wport, timeout=5.0)
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8")
+        conn.close()
+        assert resp.status == 200
+        assert f'window.__GHRAH_SUBJECT_WS_URL__="ws://127.0.0.1:{sport}/ws"' in body
+        conn = http.client.HTTPConnection("127.0.0.1", wport, timeout=5.0)
+        conn.request("GET", "/assets/app.js")
+        assert conn.getresponse().status == 200
+        conn.close()
+    finally:
+        stop.set()
+        code = await asyncio.wait_for(task, timeout=15.0)
+    assert code == 0
+    # stop 后端口释放
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while port_in_use("127.0.0.1", wport):
+        assert asyncio.get_event_loop().time() < deadline, "webui 端口未释放"
+        await asyncio.sleep(0.2)
