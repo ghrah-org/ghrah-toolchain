@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import socket
 import sys
 from pathlib import Path
 
@@ -31,12 +30,6 @@ from ghrah_bootloader.boot import (
     run_boot,
 )
 from ghrah_bootloader.layout import BootToml, DistroLayout, DistroToml
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _make_gen(
@@ -246,14 +239,14 @@ def distro_with_mock_os(tmp_path: Path):
 
 
 async def test_run_boot_env_injection_and_supervision(
-    distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, free_port_factory
 ) -> None:
     """spawn OS → env 六项注入指向数据盘 → cwd=current → 停止信号逆序收束。"""
     root, layout = distro_with_mock_os
     dump = tmp_path / "os_env.json"
     monkeypatch.setenv("BOOT_TEST_ENV_DUMP", str(dump))
     target = resolve_boot_target("generic", None, root=root)
-    port = _free_port()
+    port = free_port_factory()
     stop = asyncio.Event()
     task = asyncio.create_task(
         run_boot(
@@ -288,13 +281,13 @@ async def test_run_boot_env_injection_and_supervision(
         assert (data_root / sub).is_dir()
 
 
-async def test_run_boot_os_exit_returns_failure(distro_with_mock_os) -> None:
+async def test_run_boot_os_exit_returns_failure(distro_with_mock_os, free_port_factory) -> None:
     """OS 子进程意外退出 → run_boot 返回 1（其余子进程已收束）。"""
     root, layout = distro_with_mock_os
     bin_dir = layout.current / "env" / ".venv" / "bin"
     server = bin_dir / "ghrah-subject-server"
     # 覆写为「起健康端点后立即退出」的 OS
-    port_holder = {"port": _free_port()}
+    port_holder = {"port": free_port_factory()}
     script = (
         "import os, threading\n"
         "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
@@ -323,7 +316,7 @@ async def test_run_boot_os_exit_returns_failure(distro_with_mock_os) -> None:
     # OS 已退出，wait_for_server 会超时抛错——此用例断言该失败可被收束。
     with pytest.raises((TimeoutError, Exception)):
         await asyncio.wait_for(
-            run_boot(target, no_webui=True, subject_port=_free_port()), timeout=15.0
+            run_boot(target, no_webui=True, subject_port=free_port_factory()), timeout=15.0
         )
 
 
@@ -625,14 +618,14 @@ def gen_distro_with_mock_os(tmp_path: Path):
 
 
 async def test_run_boot_gen_form_env_injection_and_cwd(
-    gen_distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    gen_distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, free_port_factory
 ) -> None:
     """代形态 run_boot 端到端——OS 取代内 env（发行级入口已删）、env 六项、cwd=current。"""
     root, layout = gen_distro_with_mock_os
     dump = tmp_path / "os_gen_env.json"
     monkeypatch.setenv("BOOT_TEST_ENV_DUMP", str(dump))
     target = resolve_boot_target("generic", None, root=root)
-    port = _free_port()
+    port = free_port_factory()
     stop = asyncio.Event()
     task = asyncio.create_task(run_boot(target, no_webui=True, subject_port=port, stop_event=stop))
     try:
@@ -740,7 +733,7 @@ def test_webui_dev_dir_unavailable_fail_closed(tmp_path: Path) -> None:
 
 
 async def test_run_boot_static_webui_end_to_end(
-    gen_distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    gen_distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, free_port_factory
 ) -> None:
     """代目标 run_boot → webui 静态 serve 基座 dist + WS 注入；stop 后端口释放。"""
     import http.client
@@ -759,7 +752,7 @@ async def test_run_boot_static_webui_end_to_end(
     (dist / "assets" / "app.js").write_text("console.log('app')\n", encoding="utf-8")
     monkeypatch.setenv("BOOT_TEST_ENV_DUMP", str(tmp_path / "os_gen_env.json"))
     target = resolve_boot_target("generic", None, root=root)
-    sport, wport = _free_port(), _free_port()
+    sport, wport = free_port_factory(), free_port_factory()
     stop = asyncio.Event()
     task = asyncio.create_task(
         run_boot(target, no_browser=True, subject_port=sport, webui_port=wport, stop_event=stop)

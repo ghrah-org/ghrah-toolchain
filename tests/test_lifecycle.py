@@ -42,12 +42,6 @@ from ghrah_bootloader.lifecycle import (
 )
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 def test_config_default_ports() -> None:
     c = StackConfig()
     assert c.subject_port == 4112
@@ -227,9 +221,10 @@ def test_ensure_pnpm_missing_raises() -> None:
             stack._ensure_pnpm()
 
 
-def test_webui_start_missing_dir_raises(tmp_path: Path) -> None:
+def test_webui_start_missing_dir_raises(tmp_path: Path, free_port_factory) -> None:
     stack = BootStack(
-        StackConfig(open_browser=False, webui_port=_free_port()), webui_dir=tmp_path / "nope"
+        StackConfig(open_browser=False, webui_port=free_port_factory()),
+        webui_dir=tmp_path / "nope",
     )
     with patch("ghrah_bootloader.lifecycle.shutil.which", return_value="/usr/bin/pnpm"):
         with pytest.raises(RuntimeError, match="observer-web package not found"):
@@ -528,10 +523,10 @@ async def _wait_port_released(port: int, timeout: float = 3.0) -> bool:
     return True
 
 
-async def test_static_webui_start_stop_idempotent(tmp_path: Path) -> None:
+async def test_static_webui_start_stop_idempotent(tmp_path: Path, free_port_factory) -> None:
     """L1：静态 server 起 → stop() 释放端口 → 再 stop() 不抛。"""
     dist = _make_fake_dist(tmp_path)
-    port = _free_port()
+    port = free_port_factory()
     stack = _make_static_stack(dist, port)
     stack._start_webui_static()
     assert port_in_use("127.0.0.1", port)
@@ -540,10 +535,10 @@ async def test_static_webui_start_stop_idempotent(tmp_path: Path) -> None:
     await stack.stop()  # 幂等
 
 
-async def test_static_webui_index_injection(tmp_path: Path) -> None:
+async def test_static_webui_index_injection(tmp_path: Path, free_port_factory) -> None:
     """L2：index.html 注入 WS URL（先于首个 module script）+ Cache-Control: no-store。"""
     dist = _make_fake_dist(tmp_path)
-    port = _free_port()
+    port = free_port_factory()
     ws_url = "ws://127.0.0.1:4112/ws"
     stack = _make_static_stack(dist, port, ws_url=ws_url)
     stack._start_webui_static()
@@ -557,11 +552,11 @@ async def test_static_webui_index_injection(tmp_path: Path) -> None:
         await stack.stop()
 
 
-async def test_static_webui_assets_404_and_root_pinned(tmp_path: Path) -> None:
+async def test_static_webui_assets_404_and_root_pinned(tmp_path: Path, free_port_factory) -> None:
     """L3：静态资产 200 + 正确 MIME；缺失 404；目录钉根（../ 逃逸不出 dist）。"""
     dist = _make_fake_dist(tmp_path)
     (tmp_path / "secret.txt").write_text("top-secret", encoding="utf-8")
-    port = _free_port()
+    port = free_port_factory()
     stack = _make_static_stack(dist, port)
     stack._start_webui_static()
     try:

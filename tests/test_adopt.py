@@ -29,6 +29,15 @@ def _layout(home: Path) -> DistroLayout:
     return DistroLayout(root=home / "generic")
 
 
+def _toml(free_ports: tuple[int, int], **kw) -> DistroToml:
+    """构造 DistroToml，端口取动态空闲端口。
+
+    端口是进程外全局资源，无法用 ``GHRAH_HOME`` 隔离；测试若复用产品默认
+    端口（4112/5173），就会与同机上运行中的实例互斥。
+    """
+    return DistroToml(subject_port=free_ports[0], webui_port=free_ports[1], **kw)
+
+
 def _seed_full(home: Path) -> None:
     """顶层全量遗留：五项 + ghrah.db 边车 + bak + data/run_*。"""
     for name in ("subject.db", "subject.db-wal", "subject.db-shm", "taskstore.sqlite3"):
@@ -51,9 +60,9 @@ def test_detect_legacy(home: Path) -> None:
     assert "data" in found
 
 
-def test_adopt_full(home: Path) -> None:
+def test_adopt_full(home: Path, free_ports: tuple[int, int]) -> None:
     _seed_full(home)
-    layout, toml = _layout(home), DistroToml()
+    layout, toml = _layout(home), _toml(free_ports)
     report = adopt(layout, toml)
     data = layout.data
     assert report.noop is False
@@ -76,9 +85,9 @@ def test_adopt_full(home: Path) -> None:
     assert detect_legacy(home) == []
 
 
-def test_adopt_partial_markers(home: Path) -> None:
+def test_adopt_partial_markers(home: Path, free_ports: tuple[int, int]) -> None:
     (home / "subject.db").write_text("db", encoding="utf-8")
-    layout, toml = _layout(home), DistroToml()
+    layout, toml = _layout(home), _toml(free_ports)
     report = adopt(layout, toml)
     assert report.adopted == ["subject.db"]
     assert report.archived == []
@@ -100,28 +109,30 @@ def test_adopt_rejects_when_port_in_use(home: Path, monkeypatch: pytest.MonkeyPa
     assert (home / "subject.db").exists()  # 未改动
 
 
-def test_adopt_rejects_data_plane_conflict(home: Path) -> None:
+def test_adopt_rejects_data_plane_conflict(home: Path, free_ports: tuple[int, int]) -> None:
     _seed_full(home)
     layout = _layout(home)
     layout.data.mkdir(parents=True)
     (layout.data / "subject.db").write_text("existing", encoding="utf-8")
     with pytest.raises(AdoptError, match="同名"):
-        adopt(layout, DistroToml())
+        adopt(layout, _toml(free_ports))
     assert (home / "subject.db").read_text(encoding="utf-8") == "subject.db"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX fd 扫描")
-def test_adopt_rejects_open_fd(home: Path) -> None:
+def test_adopt_rejects_open_fd(home: Path, free_ports: tuple[int, int]) -> None:
     (home / "subject.db").write_text("db", encoding="utf-8")
     with open(home / "subject.db") as fh:  # noqa: SIM115
         with pytest.raises(AdoptError, match="句柄"):
-            adopt(_layout(home), DistroToml())
+            adopt(_layout(home), _toml(free_ports))
         assert fh.read(1) == "d"
 
 
-def test_adopt_rolls_back_on_failure(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_adopt_rolls_back_on_failure(
+    home: Path, free_ports: tuple[int, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
     _seed_full(home)
-    layout, toml = _layout(home), DistroToml()
+    layout, toml = _layout(home), _toml(free_ports)
     real_replace = os.replace
     calls = {"n": 0}
 
@@ -156,19 +167,19 @@ def test_adopt_rolls_back_on_failure(home: Path, monkeypatch: pytest.MonkeyPatch
     assert data_items == [], f"数据盘应无残留，实得 {data_items}"
 
 
-def test_adopt_second_time_is_noop(home: Path) -> None:
+def test_adopt_second_time_is_noop(home: Path, free_ports: tuple[int, int]) -> None:
     _seed_full(home)
-    layout, toml = _layout(home), DistroToml()
+    layout, toml = _layout(home), _toml(free_ports)
     first = adopt(layout, toml)
     assert first.noop is False
     second = adopt(layout, toml)
     assert second.noop is True
 
 
-def test_adopt_external_data_root(home: Path, tmp_path: Path) -> None:
+def test_adopt_external_data_root(home: Path, tmp_path: Path, free_ports: tuple[int, int]) -> None:
     _seed_full(home)
     layout = _layout(home)
-    toml = DistroToml(data_root=str(tmp_path / "ext" / "data"))
+    toml = _toml(free_ports, data_root=str(tmp_path / "ext" / "data"))
     report = adopt(layout, toml)
     assert report.noop is False
     assert (tmp_path / "ext" / "data" / "subject.db").exists()

@@ -114,11 +114,13 @@ def _spawn_fake_boot(home: Path, name: str = "ghrah-bootloader") -> subprocess.P
     return proc
 
 
-def test_stop_terminates_fake_boot(home: Path) -> None:
+def test_stop_terminates_fake_boot(home: Path, free_ports: tuple[int, int]) -> None:
     root = _distro_root(home)
     proc = _spawn_fake_boot(home)
     boot_pid_path(root).write_text(f"{proc.pid}\n", encoding="utf-8")
-    rc = stop_boot_session("generic", timeout=10)
+    rc = stop_boot_session(
+        "generic", timeout=10, subject_port=free_ports[0], webui_port=free_ports[1]
+    )
     proc.wait(timeout=10)
     assert rc == 0
     assert proc.returncode == 0
@@ -155,7 +157,10 @@ def test_stop_refuses_foreign_process(home: Path) -> None:
 
 @pytest.mark.skipif(os.name != "posix", reason="无 /proc 的 posix 模拟需 posix 平台")
 def test_stop_without_proc_skips_guard(
-    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    home: Path,
+    free_ports: tuple[int, int],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
 ) -> None:
     """macOS 回归位：/proc 不存在时护栏跳过、stop 不崩溃、继续 SIGTERM。"""
     from ghrah_bootloader import boot as boot_mod
@@ -165,7 +170,9 @@ def test_stop_without_proc_skips_guard(
     try:
         root = _distro_root(home)
         boot_pid_path(root).write_text(f"{proc.pid}\n", encoding="utf-8")
-        rc = stop_boot_session("generic", timeout=10)
+        rc = stop_boot_session(
+            "generic", timeout=10, subject_port=free_ports[0], webui_port=free_ports[1]
+        )
         proc.wait(timeout=10)
         assert rc == 0
         assert proc.returncode == 0

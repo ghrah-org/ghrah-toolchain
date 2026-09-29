@@ -192,14 +192,6 @@ class TestBootGeneration:
     """
 
     @staticmethod
-    def _free_port() -> int:
-        import socket as _socket
-
-        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-
-    @staticmethod
     async def _wait_port(port: int, *, listening: bool, timeout: float) -> None:
         import asyncio as _asyncio
         import time as _time
@@ -214,7 +206,7 @@ class TestBootGeneration:
             await _asyncio.sleep(0.5)
 
     async def test_ip3_boot_os_gen_env_and_static_webui(
-        self, home_packages: Path, repo: Path
+        self, home_packages: Path, repo: Path, free_port_factory
     ) -> None:
         import asyncio as _asyncio
         import http.client as _http
@@ -228,7 +220,7 @@ class TestBootGeneration:
         assert target.tree == entry.path.resolve()
 
         # --no-webui：OS 经代内 env 真实拉起（健康检查过）→ stop 端口释放
-        sport = self._free_port()
+        sport = free_port_factory()
         stop = _asyncio.Event()
         task = _asyncio.create_task(
             run_boot(target, no_webui=True, no_browser=True, subject_port=sport, stop_event=stop)
@@ -242,8 +234,8 @@ class TestBootGeneration:
         await self._wait_port(sport, listening=False, timeout=5.0)
 
         # 全栈：webui 静态 serve 真实 dist + index WS 注入 → stop 端口释放
-        wport = self._free_port()
-        sport2 = self._free_port()
+        wport = free_port_factory()
+        sport2 = free_port_factory()
         stop2 = _asyncio.Event()
         task2 = _asyncio.create_task(
             run_boot(
