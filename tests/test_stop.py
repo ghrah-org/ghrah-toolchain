@@ -213,7 +213,7 @@ def test_stop_timeout_reports_stuck(home: Path) -> None:
         time.sleep(0.1)
 
 
-# ── C4/W2+W5：Windows stop 升级链（nt 模拟，mock winproc/_taskkill） ──
+# ── Windows stop 升级链（nt 模拟，mock winproc/_taskkill） ──
 
 
 class _OsProxy:
@@ -362,7 +362,7 @@ def test_stop_nt_guard_unavailable_degrades(
 def test_stop_nt_busy_ports_hint_windows(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """W5：会话退出但端口占用 → nt 文案含 netstat 指引。"""
+    """会话退出但端口占用 → nt 文案含 netstat 指引。"""
     root = _distro_root(home)
     pid = 4242
     boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
@@ -377,7 +377,7 @@ def test_stop_nt_busy_ports_hint_windows(
 def test_write_boot_pid_fails_closed_on_unknown(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """W1 连锁：探测不可用（None）→ fail-closed 拒绝 + 人工处置文案。"""
+    """探测不可用（None）→ fail-closed 拒绝 + 人工处置文案。"""
     from ghrah_bootloader import boot as boot_mod
 
     root = _distro_root(home)
@@ -388,7 +388,7 @@ def test_write_boot_pid_fails_closed_on_unknown(
 
 
 def test_write_boot_pid_recycles_on_dead_nt(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """W1 连锁：Windows 下 pid 死 → 陈旧 pidfile 正常回收（恒真桩缺陷消解）。"""
+    """Windows 下 pid 死 → 陈旧 pidfile 正常回收（恒真桩缺陷消解）。"""
     from ghrah_bootloader import boot as boot_mod
 
     root = _distro_root(home)

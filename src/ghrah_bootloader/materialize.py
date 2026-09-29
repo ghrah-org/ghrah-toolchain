@@ -4,12 +4,12 @@
 
 """组合代物化：基座产物树 + （空）插件集 → generations/<gen-id>/（per-gen env）。
 
-B3 语义（PM §3.3/§3.4）：
+物化语义：
 
 ```
 generations/<gen-id>/
-  GENERATION.toml        # 基座 ver+commit、插件集（B3 恒空，B5 激活）、pins_sha256、built_at
-  .deps-fingerprint      # GENERATION.toml canonical 内容哈希（排除 built_at——D2）
+  GENERATION.toml        # 基座 ver+commit、插件集（当前恒空）、pins_sha256、built_at
+  .deps-fingerprint      # GENERATION.toml canonical 内容哈希（排除 built_at）
   env/.venv/             # uv venv + uv pip install 基座 wheels + pins 平铺（零解析）
   env/node/              # webui shim（file: 消费基座 tarballs + observer-web）+ pnpm install
 ```
@@ -80,7 +80,7 @@ def _run(
 
 @dataclass(frozen=True)
 class PluginRef:
-    """可用面插件 pin（B3 恒不出现于物化链路；B5 激活）。"""
+    """可用面插件 pin（当前恒不出现于物化链路）。"""
 
     name: str
     version: str
@@ -131,7 +131,7 @@ def render_generation_toml(spec: GenerationSpec, *, built_at: str | None) -> str
     """GENERATION.toml 序列化；``built_at=None`` 输出 canonical 形态（指纹输入）。
 
     canonical 形态与最终形态逐字节一致，仅缺 ``built_at`` 行——排除物化时刻
-    噪声，保证同组合指纹恒等（D2）。
+    噪声，保证同组合指纹恒等。
     """
     lines = [
         "# ghrah-bootloader 组合代清单；由 materialize_generation 维护",
@@ -347,9 +347,9 @@ def _install_webui_env(distro_root: Path, base_tree: Path, manifest: dict, node_
     经 ``file:`` 消费时 pnpm 无法解析（实测 ERR_PNPM_WORKSPACE_PKG_NOT_FOUND）。
     故 shim 只声明对 observer-web 的直接 ``file:`` 依赖，其余 @ghrah/* 经
     ``pnpm.overrides`` 重写到基座 tarball（相对路径以 shim 目录解析；tarball
-    文件名从基座 manifest 权威读取——文件名解析不可靠，B1 教训）。第三方
+    文件名从基座 manifest 权威读取——文件名解析不可靠）。第三方
     依赖由 pnpm 现场解析并以生成的 pnpm-lock.yaml 固化在代内（同代复用零
-    解析；漂移窗口仅换代时——D7）。
+    解析；漂移窗口仅换代时）。
     """
     node_dir.mkdir(parents=True)
     observer = base_tree / "observer-web"

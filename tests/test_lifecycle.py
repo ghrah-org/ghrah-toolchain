@@ -11,7 +11,7 @@
 - stop() 幂等与端口复核
 - OS 子进程 spawn/收束（新增：out-of-process 语义）
 - wait_for_server（stdlib urllib 轮询）
-- webui 静态 serve（B4 4.2：起/停/幂等、index 注入、资产服务/目录钉根、端口占用拒绝）
+- webui 静态 serve（起/停/幂等、index 注入、资产服务/目录钉根、端口占用拒绝）
 """
 
 from __future__ import annotations
@@ -402,7 +402,7 @@ async def test_wait_for_server_timeout() -> None:
         await wait_for_server(f"http://127.0.0.1:{port}/health", timeout=0.5, name="test")
 
 
-# ── C4/W4：pnpm 调用统一（平台模拟） ─────────────────────────
+# ── pnpm 调用统一（平台模拟） ─────────────────────────
 
 
 def test_start_webui_nt_uses_cmd_c_pnpm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -485,7 +485,7 @@ def test_start_webui_posix_uses_bare_pnpm(tmp_path: Path, monkeypatch: pytest.Mo
     assert popen_calls[0]["start_new_session"] is True
 
 
-# ── webui 静态 serve（B4 4.2：L1-L4） ────────────────────────
+# ── webui 静态 serve（L1-L4） ────────────────────────
 
 
 def _make_fake_dist(tmp_path: Path) -> Path:

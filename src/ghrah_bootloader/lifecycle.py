@@ -45,7 +45,7 @@ _WS_URL_GLOBAL = "__GHRAH_SUBJECT_WS_URL__"
 
 
 def _ws_url_inject_script(ws_url: str) -> str:
-    """静态 serve 的 WS URL 注入 script 标签（D3：先于首个 module script 执行）。"""
+    """静态 serve 的 WS URL 注入 script 标签（先于首个 module script 执行）。"""
     escaped = ws_url.replace('"', '\\"')
     return f'<script>window.{_WS_URL_GLOBAL}="{escaped}";</script>'
 
@@ -207,12 +207,12 @@ class StackConfig:
 class BootStack:
     """OS 子进程 + webui（dev 子进程 / 静态线程）的生命周期管理。
 
-    - OS（Subject + 内嵌 Core）：经 ``spawn_os_process`` 以发行版 env 的
+    - OS（Subject + 内嵌 Core）：经 ``spawn_os_process`` 以代内 env 的
       ``ghrah-subject-server`` 独立进程拉起（引导器不 import ghrah）。
-    - webui dev server：``subprocess.Popen``（pnpm dev --strictPort）。
-    - webui 静态 serve：``ThreadingHTTPServer`` + daemon 线程（stdlib，目录钉
-      dist 根；index.html 注入 WS URL）；``webui_dir`` 与
-      ``webui_static_root/webui_ws_url`` 互斥。
+    - webui 静态 serve（默认）：``ThreadingHTTPServer`` + daemon 线程（stdlib，
+      目录钉 dist 根；index.html 注入 WS URL）。
+    - webui dev server（``--webui-dev``）：``subprocess.Popen``（pnpm dev
+      --strictPort），仅显式开发域路径触达。
 
     所有资源在 ``stop()`` 中逆序释放（webui → OS）；重复 ``stop()`` 幂等；
     未 ``start()`` 即 ``stop()`` 不抛。
@@ -436,7 +436,7 @@ class BootStack:
         )
         self._wait_webui_ready(self._webui_process)
 
-    # ── webui 静态 serve（B4 4.2） ──
+    # ── webui 静态 serve ──
 
     def _start_webui_static(self) -> None:
         """静态 serve 基座产物 dist：stdlib http server + daemon 线程。"""

@@ -5,12 +5,10 @@
 """boot 编排：解析引导目标 → 组装 OS/前端（代内入口 + 静态 serve）→ 监督与收束。
 
 - OS 入口经 ``current`` 进代（``current/env/.venv/bin/ghrah-subject-server``）；
-  ``current`` 下无代内 env 时过渡兜底用发行级 ``env/.venv``（显式告警，
-  4.4 退役）。OS ``cwd`` 为 ``current/`` 稳定路径；数据面五项 + 端口全量 env
-  注入，指向发行版数据盘（版本无关，不落任何版本的默认位）。
+  OS ``cwd`` 为 ``current/`` 稳定路径；数据面五项 + 端口全量 env 注入，
+  指向发行版数据盘（版本无关，不落任何版本的默认位）。
 - webui 默认静态 serve 基座产物 dist（代目标：``versions/<base>/observer-web/dist``，
-  index.html 响应注入 WS URL）；过渡期 versions 树目标沿用 pnpm dev（经
-  ``current`` 拼包路径）；``--webui-dev`` 显式走开发域源码树。
+  index.html 响应注入 WS URL）；``--webui-dev`` 显式走开发域源码树。
 - 引导器不 import ghrah：OS 的 ``ghrah.*`` 全部来自代内 env。
 - 救援：``--ref last-good`` 取 last-good 符号链接（缺失回退
   ``boot.toml.last_good``）并重指 ``current``；``--restore-snapshot``
@@ -153,37 +151,26 @@ def os_server_command(venv: Path) -> list[str]:
 
 
 def resolve_os_server(layout: DistroLayout) -> list[str]:
-    """OS 入口解析序：``current/env/.venv``（代内 per-gen env）优先，发行级 env 兜底过渡。
+    """OS 入口：``current/env/.venv``（代内 per-gen env）。
 
-    - ``current/env/.venv`` 有入口 → 用代内 env（B4 终态）；
-    - 缺失且发行级 ``env/.venv`` 有入口 → 显式告警降级用旧入口（过渡兜底，4.4 删）；
-    - 两者皆缺 → 报「发行版 env 未物化」。
+    发行级 ``env/`` 兜底已退役（worktree 形态不再支持）；
+    代内 env 缺失即报错。
     """
     gen_venv = layout.current / "env" / ".venv"
     if os_server_entry(gen_venv).is_file():
         return os_server_command(gen_venv)
-    if os_server_entry(layout.venv).is_file():
-        logger.warning(
-            "current 下无代内 env OS 入口（%s），过渡兜底用发行级 env: %s（4.4 退役）",
-            gen_venv,
-            layout.venv,
-        )
-        return os_server_command(layout.venv)
-    raise BootloaderError(
-        f"OS server 入口缺失: {gen_venv} 与发行级 {layout.venv} 均无 ghrah-subject-server"
-        "（发行版 env 未物化，请先完成安装）"
-    )
+    raise BootloaderError(f"OS server 入口缺失: {gen_venv}（当前代 env 未物化，请先完成安装）")
 
 
-def webui_static_root(target: BootTarget) -> Path | None:
+def webui_static_root(target: BootTarget) -> Path:
     """静态 serve 根：代目标 → 基座树 ``versions/<base>/observer-web/dist``。
 
-    非代目标（过渡期 versions 树）返回 ``None``（调用方沿用旧 pnpm dev 路径）；
-    代目标 dist 缺失 → fail-closed（基座产物不完整）。
+    引导目标恒为组合代（``read_generation`` 必命中）；dist 缺失 →
+    fail-closed（基座产物不完整）。
     """
     info = read_generation(target.tree)
     if info is None:
-        return None
+        raise BootloaderError(f"引导目标不是组合代: {target.tree}（current 只指向 generations/）")
     dist = target.layout.versions / info.base_version / "observer-web" / "dist"
     if not dist.is_dir():
         raise BootloaderError(
@@ -214,19 +201,16 @@ def webui_dev_dir(target: BootTarget, dev_dir_arg: str | Path | None) -> Path:
 
 
 def _within_managed_segment(layout: DistroLayout, tree: Path) -> bool:
-    """树是否落在受管段（generations/ ∪ versions/）内的单层目标。
+    """树是否落在受管段 ``generations/`` 内的单层目标。
 
-    双段兼容期（B3.5）：packages 域 current → generations/<gen-id>，worktree
-    域 current → versions/<ver>；两段之外逃逸拒绝（B4.4 收敛 generations-only）。
+    current/last-good 只允许指向组合代；``versions/`` 是基座产物库
+    （枚举显示面），不再作为引导目标。
     """
-    for segment in (layout.generations, layout.versions):
-        try:
-            rel = tree.relative_to(segment.resolve())
-        except (ValueError, OSError):
-            continue
-        if len(rel.parts) == 1:
-            return True
-    return False
+    try:
+        rel = tree.relative_to(layout.generations.resolve())
+    except (ValueError, OSError):
+        return False
+    return len(rel.parts) == 1
 
 
 def resolve_boot_target(
@@ -266,7 +250,7 @@ def resolve_boot_target(
             )
         tree = layout.current.resolve()
         if not _within_managed_segment(layout, tree):
-            raise BootloaderError(f"current 指向 versions/ 或 generations/ 之外的路径: {tree}")
+            raise BootloaderError(f"current 指向 generations/ 之外的路径: {tree}")
         version = tree.name
         if version_arg and version_arg != version:
             raise BootloaderError(
@@ -289,19 +273,21 @@ def resolve_boot_target(
 
 
 def _resolve_last_good_tree(layout: DistroLayout, boot: BootToml, distro: str) -> Path:
-    """last-good 目标树：符号链接优先，缺失回退 ``boot.toml.last_good``。"""
+    """last-good 目标树：符号链接优先，缺失回退 ``boot.toml.last_good``。
+
+    查段固定 ``generations/``。
+    """
     if layout.last_good.is_symlink() or layout.last_good.exists():
         tree = layout.last_good.resolve()
         if not _within_managed_segment(layout, tree):
-            raise BootloaderError(f"last-good 指向 versions/ 或 generations/ 之外的路径: {tree}")
+            raise BootloaderError(f"last-good 指向 generations/ 之外的路径: {tree}")
         return tree
     if boot.last_good and "/" in boot.last_good:
         lg_distro, lg_ver = boot.last_good.split("/", 1)
         if lg_distro == distro:
-            for segment in (layout.generations, layout.versions):
-                tree = (segment / lg_ver).resolve()
-                if tree.is_dir():
-                    return tree
+            tree = (layout.generations / lg_ver).resolve()
+            if tree.is_dir():
+                return tree
     raise BootloaderError(
         f"last-good 未设置或不可用: {layout.last_good} / boot.toml last_good={boot.last_good!r}"
     )
@@ -345,7 +331,7 @@ async def run_boot(
         # （OS cwd / webui / 自管 .pth 均经 current 段生效）
         with acquire_distro_lock(target.layout.root):
             repoint_current(target.layout.root, target.version)
-        logger.info("救援重指 current → versions/%s", target.version)
+        logger.info("救援重指 current → generations/%s", target.version)
     data_root = resolve_data_root(target.layout, target.distro_toml)
     ensure_data_dirs(data_root)
     sport = subject_port if subject_port is not None else target.distro_toml.subject_port
@@ -361,19 +347,14 @@ async def run_boot(
         _ENV_SERVER_HOST: config.host,
         _ENV_SERVER_PORT: str(sport),
     }
-    # 形态判定装配（D5）：--webui-dev 显式走开发域；代目标静态 serve 基座 dist
-    # （D2 根 + D3 WS 注入）；过渡期 versions 树目标沿用旧 dev 路径（4.4 删）。
+    # 形态判定装配：--webui-dev 显式走开发域；否则静态 serve 基座 dist。
     webui_kwargs: dict[str, object] = {}
     if not no_webui:
         if webui_dev or webui_dev_dir_arg is not None:
             webui_kwargs["webui_dir"] = webui_dev_dir(target, webui_dev_dir_arg)
         else:
-            static_root = webui_static_root(target)
-            if static_root is not None:
-                webui_kwargs["webui_static_root"] = static_root
-                webui_kwargs["webui_ws_url"] = config.subject_ws_url()
-            else:
-                webui_kwargs["webui_dir"] = target.layout.current.joinpath(*_WEBUI_PACKAGE_RELPATH)
+            webui_kwargs["webui_static_root"] = webui_static_root(target)
+            webui_kwargs["webui_ws_url"] = config.subject_ws_url()
     stack = BootStack(
         config,
         os_command=resolve_os_server(target.layout),
@@ -424,7 +405,7 @@ async def run_boot(
         await asyncio.shield(stack.stop())
 
 
-# ── 救援与 known-good（D7） ──────────────────────────────────
+# ── 救援与 known-good ──────────────────────────────────
 
 
 def _perform_snapshot_restore(target: BootTarget, *, yes: bool) -> None:
@@ -447,7 +428,7 @@ def _perform_snapshot_restore(target: BootTarget, *, yes: bool) -> None:
         restored = snapshot.restore(target.layout, target.distro_toml, latest)
         logger.info("快照已恢复: %s（数据回到旧版本 %s 方向）", latest.name, restored or "未知")
     repoint_current(distro_root, target.version)
-    logger.info("救援重指 current → versions/%s", target.version)
+    logger.info("救援重指 current → generations/%s", target.version)
 
 
 def _update_last_good(target: BootTarget) -> None:
@@ -582,7 +563,7 @@ def _stop_windows(
     subject_port: int | None,
     webui_port: int | None,
 ) -> int:
-    """Windows stop 升级链（W2）：taskkill 优雅 → 轮询 → ``/F /T`` 强杀。
+    """Windows stop 升级链：taskkill 优雅 → 轮询 → ``/F /T`` 强杀。
 
     优雅段返回码不检查（控制台进程的 WM_CLOSE 多半无效——诚实面：
     实际语义≈「强杀升级链」；``/T`` 按进程树终止兜底 OS/webui 孤儿）。

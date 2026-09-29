@@ -16,7 +16,7 @@
   重指（symlink+replace → 删旧建新 symlink → junction）。
 
 纯 stdlib（ctypes / _winapi）。对 Windows API 的调用形态由平台模拟单测
-锁定——mock 表面收敛于本模块（计划 D1/D8）；真机行为属 B4 后验收面。
+锁定——mock 表面收敛于本模块；真机行为待真机验收。
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def _close_handle(k32, handle) -> None:
 
 
 def pid_alive(pid: int) -> bool | None:
-    """Windows pid 存活探测（跨平台诊断 §二.2 恒真桩的替换）。
+    """Windows pid 存活探测（替换早期恒返回 True 的桩实现）。
 
     Returns:
         ``True``：进程存活（exit code = STILL_ACTIVE，或

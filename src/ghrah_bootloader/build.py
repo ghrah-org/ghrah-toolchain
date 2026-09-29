@@ -170,7 +170,7 @@ def _build_into(repo: Path, sha: str, staging: Path) -> BuildResult:
     wheel_files = _build_wheels(src, wheels_dir)
     pins_file = _export_pins(src, wheels_dir)
     tarball_entries = _build_webui(src, tarballs_dir, staging)
-    shutil.rmtree(src)  # 产物树不含源码 checkout（纯产物，对齐 PM 目标态）
+    shutil.rmtree(src)  # 产物树不含源码 checkout（纯产物）
     _write_bootstrap(staging, sha)
     _write_manifest(staging, sha, wheel_files, pins_file, tarball_entries)
     return BuildResult(

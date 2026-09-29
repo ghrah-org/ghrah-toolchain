@@ -151,13 +151,10 @@ def _cmd_install(args: argparse.Namespace) -> int:
         version=args.version,
         gate=_resolve_gate(args, distro_toml),
     )
-    if distro_toml.install_mode == "packages":
-        print(
-            f"已安装并重指 current → {entry.label}（commit {entry.commit}，"
-            f"组合代 {entry.version} 已物化，env 就位；boot 接线属 B4）"
-        )
-    else:
-        print(f"已安装并重指 current → {entry.label}（commit {entry.commit}，worktree）")
+    print(
+        f"已安装并重指 current → {entry.label}（commit {entry.commit}，"
+        f"组合代 {entry.version} 已物化，env 就位）"
+    )
     if args.adopt_legacy_data:
         report = adopt_legacy(DistroLayout(root=distro_root), distro_toml, subject_port=None)
         if not report.noop:
@@ -203,7 +200,6 @@ def _cmd_runtime_status(args: argparse.Namespace) -> int:
         print(f"[{distro}] generations = " + (", ".join(e.detail for e in gens) or "（无）"))
     print(
         f"[{distro}] 配置 source = {distro_toml.ref_source} gate = {distro_toml.ref_gate} "
-        f"install_mode = {distro_toml.install_mode} "
         f"fetch_on_update = {distro_toml.ref_fetch_on_update}"
     )
     try:
@@ -322,10 +318,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             tree = layout.current.resolve()
             current_target = str(tree)
             info = read_generation(tree)
-            if info is not None:
-                commit = info.base_commit
-            else:
-                commit = manager._tree_commit(tree)
+            commit = info.base_commit if info is not None else manager._tree_commit(tree)
         except (OSError, RuntimeError):
             current_target = "(current 缺失)"
         behind = "候选不可解析"
@@ -341,15 +334,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             )
         except RuntimeRefError:
             pass
-        # 版本树缺身份（无 BOOTSTRAP 且非 git 树）= 异常态或旧形态残树
+        # 当前代缺身份（无 BOOTSTRAP）= 异常态
         identity_note = ""
-        if commit is None and layout.list_versions():
-            identity_note = "（版本树缺 BOOTSTRAP/git 身份：旧 worktree 形态或异常态）"
+        if commit is None:
+            identity_note = "（当前代缺 BOOTSTRAP 身份：异常态，建议重新 install）"
         print(
             f"[{distro}] versions={layout.list_versions() or '-'} "
             f"generations={layout.list_generations() or '-'} "
             f"current={current_target} commit={_short(commit)}{identity_note} "
-            f"install_mode={distro_toml.install_mode} "
             f"落后情况={behind} "
             f"subject_port={distro_toml.subject_port} webui_port={distro_toml.webui_port}"
         )

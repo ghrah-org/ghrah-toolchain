@@ -4,30 +4,29 @@
 
 """ref 状态机：源解析 → 建版本树/组合代 → 门禁 → 快照 → 原子重指 current → 按需 sync。
 
-纯 stdlib（subprocess / pathlib / dataclasses / tomllib / hashlib / tempfile）。
+纯 stdlib（subprocess / pathlib / dataclasses / tomllib / hashlib）。
 
-双安装模式（``[distro] install_mode``）：
+单一安装形态（``packages``, worktree 形态退役）：
 
-- ``worktree``：版本树 = ``git worktree add --detach``（旧链路，过渡期保留）；
-- ``packages``（缺省）：版本树 = B1 构建产物（wheels/tarballs/manifest/BOOTSTRAP.toml），
-  身份 = ``BOOTSTRAP.toml source_commit``（纯文件零 git），其上物化组合代
-  ``generations/<gen-id>/``（per-gen env，B3）——门禁与 sync 均跑在代上。
+- 版本树 = 构建产物（wheels/tarballs/manifest/BOOTSTRAP.toml），
+  身份 = ``BOOTSTRAP.toml source_commit``（纯文件零 git）；
+- 其上物化组合代 ``generations/<gen-id>/``（per-gen env）——门禁与 sync 均跑在代上。
 
 切换顺序固定（失败 = 什么都没发生）：
 
 ```
 guard(运行中拒绝) → lock → 解析候选 commit → 建基座树/复用
-  → [packages] 建组合代/复用（generations/<gen-id>/，per-gen env）
-  → gate（worktree：临时 env 冒烟；packages：代 env 冒烟，绝不触碰发行版 env/）
+  → 建组合代/复用（generations/<gen-id>/，per-gen env）
+  → gate（代 env 冒烟，绝不触碰任何发行版级 env/）
   → snapshot（存在旧 current 时无条件拍）
-  → repoint current（原子；packages → generations/，worktree → versions/）
-  → 按需 sync + 复核自管 .pth（worktree 模式）/ 代复核（packages 模式）
+  → repoint current（原子 → generations/）
+  → 代复核（指纹一致零操作）
   → 写 boot.toml → 释放锁
 ```
 
-- gate/snapshot 失败：current / env / boot.toml 未动；本次新建的候选树与代移除。
-- sync 及其后失败：重指回旧版本 + 旧版本复核（worktree 强制重 sync；packages
-  代指纹一致零操作）+ 回写 boot.toml + 移除本次新建 → ``RuntimeRefError``。
+- gate/snapshot 失败：current / boot.toml 未动；本次新建的候选树与代移除。
+- sync 及其后失败：重指回旧版本 + 旧代复核（指纹一致零操作）+ 回写 boot.toml
+  + 移除本次新建 → ``RuntimeRefError``。
 """
 
 from __future__ import annotations
@@ -38,7 +37,6 @@ import logging
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,10 +50,7 @@ from ghrah_bootloader.layout import (
     DistroToml,
     ghrah_root,
     list_distros,
-    managed_pth_path,
     resolve_distro_root,
-    verify_managed_pth,
-    write_managed_pth,
 )
 from ghrah_bootloader.lifecycle import DEFAULT_HOST, port_in_use
 from ghrah_bootloader.materialize import (
@@ -73,7 +68,7 @@ _GATE_LEVELS = ("basic", "full", "data")
 _STALE_LOCK_SECONDS = 600.0
 
 
-# ── 锁（D8） ─────────────────────────────────────────────────
+# ── 锁 ──────────────────────────────────────────────────────
 
 
 def distro_lock_path(distro_root: Path) -> Path:
@@ -86,7 +81,7 @@ def _pid_alive(pid: int) -> bool | None:
 
     - POSIX：``os.kill(pid, 0)``（恒返回 bool）；
     - Windows：``winproc.pid_alive``（OpenProcess + GetExitCodeProcess；
-      恒真桩退役——诊断 §二.2）。``None`` 仅在探测不可用时出现。
+      替换早期恒返回 True 的桩实现）。``None`` 仅在探测不可用时出现。
     """
     if pid <= 0:
         return False
@@ -144,24 +139,21 @@ def acquire_distro_lock(distro_root: Path, *, stale_after: float = _STALE_LOCK_S
 # ── 原子重指（boot 救援共用） ────────────────────────────────
 
 
-def _repoint_link(distro_root: Path, name: str, target: str, *, segment: str | None) -> None:
-    """原子建/更新 ``<name>`` 符号链接指向 ``<segment>/<target>``。
+def _repoint_link(distro_root: Path, name: str, target: str) -> None:
+    """原子建/更新 ``<name>`` 符号链接指向 ``generations/<target>``。
 
-    ``segment=None`` 时探测（generations 优先，回退 versions）——boot 救援
-    链路零改动兼容双形态；显式传段锁定（ensure 链内不依赖探测）。
+    段固定 generations：current/last-good 只指向组合代；
+    ``versions/`` 仍是基座产物库（枚举显示面），但不再作为引导目标。
 
     Windows 走 ``winproc.repoint_dir_link`` 三级回退（symlink+replace →
-    删旧建新 → junction；诊断 §二.4）；段字符串在此拼好，winproc 只收
-    绝对目标（段无关）。
+    删旧建新 → junction）。
     """
-    if segment is None:
-        segment = "generations" if (distro_root / "generations" / target).is_dir() else "versions"
     link = distro_root / name
     if os.name == "nt":
         from ghrah_bootloader import winproc
         from ghrah_bootloader.errors import WinProcError
 
-        target_abs = (distro_root / segment / target).resolve()
+        target_abs = (distro_root / "generations" / target).resolve()
         try:
             strategy = winproc.repoint_dir_link(link, target_abs)
         except WinProcError as e:
@@ -172,18 +164,18 @@ def _repoint_link(distro_root: Path, name: str, target: str, *, segment: str | N
     tmp = distro_root / f"{name}.tmp-{os.getpid()}"
     if tmp.is_symlink() or tmp.exists():
         tmp.unlink()
-    tmp.symlink_to(f"{segment}/{target}")
+    tmp.symlink_to(f"generations/{target}")
     os.replace(tmp, link)
 
 
-def repoint_current(distro_root: Path, ver: str, *, segment: str | None = None) -> None:
+def repoint_current(distro_root: Path, ver: str) -> None:
     """原子重指 ``current``：``current.tmp-<pid>`` 相对符号链接 + ``os.replace``。"""
-    _repoint_link(distro_root, "current", ver, segment=segment)
+    _repoint_link(distro_root, "current", ver)
 
 
-def repoint_last_good(distro_root: Path, ver: str, *, segment: str | None = None) -> None:
+def repoint_last_good(distro_root: Path, ver: str) -> None:
     """原子建/更新 ``last-good`` 符号链接。"""
-    _repoint_link(distro_root, "last-good", ver, segment=segment)
+    _repoint_link(distro_root, "last-good", ver)
 
 
 # ── 数据类型 ─────────────────────────────────────────────────
@@ -318,7 +310,7 @@ class RuntimeRefManager:
         version: str | None = None,
         gate: str = "basic",
     ) -> BootEntry:
-        """安装/切换到候选 commit 并重指 ``current``（D5 顺序；全程持锁）。"""
+        """安装/切换到候选 commit 并重指 ``current``（全程持锁）。"""
         boot_before = BootToml.load(self._root)
         d = distro or (boot_before.default.split("/", 1)[0] if boot_before.default else "")
         if not d:
@@ -362,64 +354,32 @@ class RuntimeRefManager:
         del update  # 语义检查已在入口完成（无 current 的 update 被拒绝）
         distro_root.mkdir(parents=True, exist_ok=True)
         repo = self._resolve_repo(distro_root, distro_toml)
-        mode = distro_toml.install_mode
         src = self._coerce_source(source, distro_toml)
         commit = self._resolve_candidate(src, fetch=fetch, repo=repo)
 
-        reused_ver = self._find_version_by_commit(distro, commit, mode=mode)
+        reused_ver = self._find_version_by_commit(distro, commit)
         if reused_ver is not None:
             ver, tree, created = reused_ver, distro_root / "versions" / reused_ver, False
         else:
             base_ver = version or self._derive_version_name(repo, commit)
-            ver, reused = self._claim_version_name(distro, base_ver, commit, repo, mode=mode)
+            ver, reused = self._claim_version_name(distro, base_ver, commit, repo)
             tree = distro_root / "versions" / ver
             created = not reused
             if created:
-                self._create_version_tree(distro, ver, commit, repo, mode=mode)
+                self._create_version_tree(distro, ver, commit, repo)
 
-        if mode == "packages":
-            return self._ensure_generation_locked(
-                distro,
-                distro_root,
-                boot_before,
-                old,
-                ver,
-                tree,
-                commit,
-                base_created=created,
-                src=src,
-                gate=gate,
-            )
-
-        new_entry = BootEntry(distro=distro, version=ver, path=tree, commit=commit)
-        try:
-            self._gate(tree, gate, mode=mode)
-        except Exception:
-            self._cleanup_tree(created, tree, repo, mode=mode)
-            raise
-        try:
-            if old is not None:
-                self._snapshot(distro_root, distro_toml, old, new_entry, src, gate)
-        except Exception:
-            self._cleanup_tree(created, tree, repo, mode=mode)
-            raise
-        try:
-            repoint_current(distro_root, ver)
-            self._sync(distro, ver, mode=mode)
-            self._write_boot_toml(boot_before, old, new_entry)
-            if old is None:
-                repoint_last_good(distro_root, ver)
-        except Exception as e:
-            logger.error("切换失败，开始回退: %s", e)
-            try:
-                self._rollback(distro, old, boot_before, mode=mode)
-            except Exception:
-                logger.error("回退失败（人工介入检查 current/env/boot.toml）", exc_info=True)
-            self._cleanup_tree(created, tree, repo, mode=mode)
-            target = old.label if old is not None else "（无版本）"
-            raise RuntimeRefError(f"切换到 {new_entry.label} 失败，已回退至 {target}: {e}") from e
-        self._log_change(old, new_entry, src, gate)
-        return new_entry
+        return self._ensure_generation_locked(
+            distro,
+            distro_root,
+            boot_before,
+            old,
+            ver,
+            tree,
+            commit,
+            base_created=created,
+            src=src,
+            gate=gate,
+        )
 
     def _ensure_generation_locked(
         self,
@@ -437,7 +397,7 @@ class RuntimeRefManager:
     ) -> BootEntry:
         """packages 域四段续建：基座就位后物化组合代 → 门禁在代 → 重指到代。
 
-        失败清理分层（D10）：新建基座与新建代同删；复用的基座/代保留。
+        失败清理分层：新建基座与新建代同删；复用的基座/代保留。
         """
         spec = self._generation_spec(tree, ver, commit)
         gen = spec.gen_id()
@@ -454,39 +414,39 @@ class RuntimeRefManager:
                 kind="generation",
                 base_version=ver,
             )
-            self._gate(gen_dir, gate, mode="packages")
+            self._gate(gen_dir, gate)
         except Exception:
             self._cleanup_generation(gen_created, gen_dir)
-            self._cleanup_tree(base_created, tree, None, mode="packages")
+            self._cleanup_tree(base_created, tree)
             raise
         try:
             if old is not None:
                 self._snapshot(distro_root, DistroToml.load(distro_root), old, new_entry, src, gate)
         except Exception:
             self._cleanup_generation(gen_created, gen_dir)
-            self._cleanup_tree(base_created, tree, None, mode="packages")
+            self._cleanup_tree(base_created, tree)
             raise
         try:
-            repoint_current(distro_root, gen, segment="generations")
-            self._sync(distro, gen, mode="packages")
+            repoint_current(distro_root, gen)
+            self._sync(distro, gen)
             self._write_boot_toml(boot_before, old, new_entry)
             if old is None:
-                repoint_last_good(distro_root, gen, segment="generations")
+                repoint_last_good(distro_root, gen)
         except Exception as e:
             logger.error("切换失败，开始回退: %s", e)
             try:
-                self._rollback(distro, old, boot_before, mode="packages")
+                self._rollback(distro, old, boot_before)
             except Exception:
-                logger.error("回退失败（人工介入检查 current/env/boot.toml）", exc_info=True)
+                logger.error("回退失败（人工介入检查 current/boot.toml）", exc_info=True)
             self._cleanup_generation(gen_created, gen_dir)
-            self._cleanup_tree(base_created, tree, None, mode="packages")
+            self._cleanup_tree(base_created, tree)
             target = old.label if old is not None else "（无版本）"
             raise RuntimeRefError(f"切换到 {new_entry.label} 失败，已回退至 {target}: {e}") from e
         self._log_change(old, new_entry, src, gate)
         return new_entry
 
     def _generation_spec(self, tree: Path, ver: str, commit: str) -> GenerationSpec:
-        """从基座产物树读 pins_sha256，组装代身份输入（插件集 B3 恒空）。"""
+        """从基座产物树读 pins_sha256，组装代身份输入（插件集当前恒空）。"""
         pins = tree / "wheels" / "pins.txt"
         if not pins.is_file():
             raise RuntimeRefError(f"基座产物树无 pins.txt: {tree}")
@@ -498,7 +458,7 @@ class RuntimeRefManager:
         if created:
             shutil.rmtree(gen_dir, ignore_errors=True)
 
-    # ── 源解析（D9/D10） ──
+    # ── 源解析 ──
 
     def _resolve_repo(self, distro_root: Path, distro_toml: DistroToml) -> Path:
         """仓路径优先级：``--repo`` > env ``GHRAH_MONOREPO_ROOT`` > ``distro.toml`` > 报错。"""
@@ -554,7 +514,7 @@ class RuntimeRefManager:
             )
         return cp.stdout.strip()
 
-    # ── 版本命名与建树（D1） ──
+    # ── 版本命名与建树 ──
 
     def _derive_version_name(self, repo: Path, commit: str) -> str:
         out = self._run(
@@ -565,7 +525,7 @@ class RuntimeRefManager:
         return out
 
     def _claim_version_name(
-        self, distro: str, base_ver: str, commit: str, repo: Path, *, mode: str
+        self, distro: str, base_ver: str, commit: str, repo: Path
     ) -> tuple[str, bool]:
         """裁定版本名：同名同 commit 复用；同名不同 commit 追加 ``-<short7>``；仍冲突报错。"""
         candidates = [base_ver]
@@ -580,111 +540,77 @@ class RuntimeRefManager:
             tree = layout.versions / ver
             if not tree.is_dir():
                 return ver, False
-            if self._version_identity(tree, mode) == commit:
+            if self._version_identity(tree) == commit:
                 return ver, True
         raise RuntimeRefError(
             f"版本名冲突: {layout.versions / candidates[-1]} 已存在且 commit 不同（版本名不可变）"
         )
 
-    def _find_version_by_commit(self, distro: str, commit: str, *, mode: str) -> str | None:
+    def _find_version_by_commit(self, distro: str, commit: str) -> str | None:
         """复用已装 commit（回退/重复 install 不建重复树——「已装不动」）。
 
-        复用判定按模式严格取身份：packages 只认 BOOTSTRAP.toml，worktree 只认
-        git——混域（手改模式后的旧形态树）不构成复用依据（fail-closed）。
+        身份严格取 BOOTSTRAP.toml（packages 形态唯一身份）。
         """
         layout = DistroLayout(root=self._root / distro)
         for ver in layout.list_versions():
-            if self._version_identity(layout.versions / ver, mode) == commit:
+            if self._version_identity(layout.versions / ver) == commit:
                 return ver
         return None
 
-    def _create_version_tree(
-        self, distro: str, ver: str, commit: str, repo: Path, *, mode: str
-    ) -> Path:
-        """建版本树：worktree = ``git worktree add --detach``；packages = B1 构建产物。"""
+    def _create_version_tree(self, distro: str, ver: str, commit: str, repo: Path) -> Path:
+        """建版本树：物化即构建（产物树，wheels/tarballs/observer-web/BOOTSTRAP）。"""
         layout = DistroLayout(root=self._root / distro)
         tree = layout.versions / ver
         tree.parent.mkdir(parents=True, exist_ok=True)
         if tree.exists():
-            if self._version_identity(tree, mode) == commit:
+            if self._version_identity(tree) == commit:
                 return tree
             raise RuntimeRefError(f"版本目录已存在且 commit 不同: {tree}")
-        if mode == "packages":
-            # 物化即构建：staging 隔离 + os.replace 原子落位（B1 机械）；
-            # 失败时 staging 清理、目标不存在——「失败 = 什么都没发生」。
-            try:
-                build_artifacts(repo, commit, out_dir=tree)
-            except BootloaderError as e:
-                raise RuntimeRefError(f"建版本树失败 {ver}: {e}") from e
-            return tree
+        # 物化即构建：staging 隔离 + os.replace 原子落位；
+        # 失败时 staging 清理、目标不存在——「失败 = 什么都没发生」。
         try:
-            self._run(["git", "-C", str(repo), "worktree", "add", "--detach", str(tree), commit])
-        except subprocess.CalledProcessError as e:
-            shutil.rmtree(tree, ignore_errors=True)
-            raise RuntimeRefError(f"建版本树失败 {ver}: {e.stderr.strip()}") from e
+            build_artifacts(repo, commit, out_dir=tree)
+        except BootloaderError as e:
+            raise RuntimeRefError(f"建版本树失败 {ver}: {e}") from e
         return tree
 
-    def _cleanup_tree(self, created: bool, tree: Path, repo: Path | None, *, mode: str) -> None:
-        """失败时移除本次新建的候选树（既有树保留——失败 = 什么都没发生）。
-
-        packages 域调用方可传 ``created=True, repo=None`` 表达「packages 分支
-        语义下的新建树清理」（与 ``_cleanup_generation`` 联动，D10）。
-        """
+    def _cleanup_tree(self, created: bool, tree: Path) -> None:
+        """失败时移除本次新建的候选基座树（既有树保留——失败 = 什么都没发生）。"""
         if not created:
             return
-        if mode == "packages":
-            shutil.rmtree(tree, ignore_errors=True)
-            return
-        assert repo is not None  # worktree 分支必传仓路径
-        self._run(["git", "-C", str(repo), "worktree", "remove", "--force", str(tree)], check=False)
-        self._run(["git", "-C", str(repo), "worktree", "prune"], check=False)
-        if tree.exists():
-            shutil.rmtree(tree, ignore_errors=True)
+        shutil.rmtree(tree, ignore_errors=True)
 
-    def _version_identity(self, tree: Path, mode: str) -> str | None:
-        """按模式取版本树身份（复用判定面）：packages=BOOTSTRAP；worktree=git。"""
-        if mode == "packages":
-            return read_source_commit(tree)
-        cp = self._run(["git", "-C", str(tree), "rev-parse", "HEAD"], check=False)
-        return cp.stdout.strip() if cp.returncode == 0 else None
+    def _version_identity(self, tree: Path) -> str | None:
+        """版本树身份（复用判定面）：BOOTSTRAP.toml source_commit。"""
+        return read_source_commit(tree)
 
     def _tree_commit(self, tree: Path) -> str | None:
-        """显示面身份（双跳）：BOOTSTRAP.toml → git rev-parse → None。
-
-        兼容存量域内 worktree 形态树（迁移期显示不缺失）；严格复用判定走
-        :meth:`_version_identity`。
-        """
-        commit = read_source_commit(tree)
-        if commit is not None:
-            return commit
-        cp = self._run(["git", "-C", str(tree), "rev-parse", "HEAD"], check=False)
-        return cp.stdout.strip() if cp.returncode == 0 else None
+        """显示面身份：BOOTSTRAP.toml source_commit（无 git 回退）。"""
+        return read_source_commit(tree)
 
     def _current_entry(self, distro: str) -> BootEntry | None:
         layout = DistroLayout(root=self._root / distro)
         if not layout.current.exists():
             return None
         tree = layout.current.resolve()
-        kind, base_version = self._entry_kind(layout, tree)
-        if kind == "generation":
-            info = read_generation(tree)
-            return BootEntry(
-                distro=distro,
-                version=tree.name,
-                path=tree,
-                commit=info.base_commit if info else None,
-                kind="generation",
-                base_version=info.base_version if info else "",
-            )
+        self._entry_kind(layout, tree)
+        info = read_generation(tree)
         return BootEntry(
-            distro=distro, version=tree.name, path=tree, commit=self._tree_commit(tree)
+            distro=distro,
+            version=tree.name,
+            path=tree,
+            commit=info.base_commit if info else None,
+            kind="generation",
+            base_version=info.base_version if info else "",
         )
 
     @staticmethod
     def _entry_kind(layout: DistroLayout, tree: Path) -> tuple[str, str]:
-        """判定 current 指向的树形态（双段逃逸校验：generations ∪ versions）。
+        """判定 current 指向的树形态（generations-only 逃逸校验）。
 
-        返回 (kind, base_version)；两段之外 → ``RuntimeRefError``（fail-closed）。
+        current/last-good 只允许指向 ``generations/<gen-id>``；
+        两段之外（含 ``versions/``）→ ``RuntimeRefError``（fail-closed）。
+        返回 (kind, base_version) 以兼容调用面。
         """
         try:
             gen_rel = tree.relative_to(layout.generations.resolve())
@@ -692,57 +618,34 @@ class RuntimeRefManager:
             gen_rel = None
         if gen_rel is not None and len(gen_rel.parts) == 1:
             return "generation", ""
-        try:
-            tree.relative_to(layout.versions.resolve())
-        except ValueError as e:
-            raise RuntimeRefError(
-                f"current 指向 versions/ 或 generations/ 之外的路径: {tree}"
-            ) from e
-        return "version", ""
+        raise RuntimeRefError(
+            f"current 指向 generations/ 之外的路径: {tree}"
+            "（引导目标只允许组合代；versions/ 为基座产物库，不可引导）"
+        )
 
-    # ── 门禁（D4） ──
+    # ── 门禁 ──
 
-    def _gate(self, tree: Path, level: str, *, mode: str = "worktree") -> str:
-        """basic 门禁：worktree = 临时 env uv sync + import 冒烟；packages = 代上冒烟。
+    def _gate(self, gen_dir: Path, level: str) -> str:
+        """basic 门禁：在组合代 env 上冒烟。
 
-        packages 的门禁跑在组合代 env 上（PM §3.4「组合整体验收」）——代物化
-        本身已含「可装」，此处补「可 import + 入口在」。门禁绝不触碰发行版
-        worktree 模式的 ``env/``。
+        代物化本身已含「可装」，此处补「可 import + 入口在」。门禁绝不触碰
+        任何发行版级 ``env/`。
         """
         if level in ("full", "data"):
-            raise GateError(f"门禁级别 {level} 未启用（收束批次开启）")
+            raise GateError(f"门禁级别 {level} 未启用（尚未实现）")
         if level != "basic":
             raise GateError(f"未知门禁级别: {level}（应为 basic | full | data）")
-        if mode == "packages":
-            try:
-                self._gate_generation(tree)
-            except BootloaderError as e:
-                raise GateError(f"门禁 basic 未通过（代冒烟失败）: {e}") from e
-            return "passed"
-        tmp = Path(tempfile.mkdtemp(prefix="ghrah-gate-"))
-        venv = tmp / "venv"
-        py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        env = {**os.environ, "UV_PROJECT_ENVIRONMENT": str(venv)}
         try:
-            try:
-                self._run(["uv", "sync"], cwd=tree, env=env)
-                self._run(
-                    [str(py), "-c", "import ghrah.core, ghrah.protocol, ghrah.subject"],
-                    cwd=tree,
-                )
-            except subprocess.CalledProcessError as e:
-                raise GateError(
-                    f"门禁 basic 未通过: {' '.join(map(str, e.cmd))}: {e.stderr.strip()}"
-                ) from e
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            self._gate_generation(gen_dir)
+        except BootloaderError as e:
+            raise GateError(f"门禁 basic 未通过（代冒烟失败）: {e}") from e
         return "passed"
 
     def _gate_generation(self, gen_dir: Path) -> None:
         """代 env 冒烟：import 五包 + ``ghrah-subject-server`` 入口存在。
 
         入口为存在性校验（真实入口 main() 不解析参数，``--help`` 会直接启动
-        服务器占端口——B1 实测；启动冒烟属 boot 域验证）。
+        服务器占端口；启动冒烟属 boot 域验证）。
         """
         venv = gen_dir / "env" / ".venv"
         py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -790,53 +693,14 @@ class RuntimeRefManager:
             snapshot.roll(layout, distro_toml, distro_toml.snapshot_keep)
         return snap
 
-    # ── 按需 sync（D2/D3） ──
+    # ── 代复核 ──
 
-    def _sync(self, distro: str, ver: str, *, force: bool = False, mode: str = "worktree") -> None:
-        """依赖指纹变化才 uv sync / pnpm install；始终复核自管 ``.pth``。
+    def _sync(self, distro: str, ver: str, *, force: bool = False) -> None:
+        """代复核：重指后校验 ``generations/<ver>`` 指纹与完整性，不一致/缺代才重建物化。
 
-        packages 模式 = 代复核：重指后校验 ``generations/<ver>`` 指纹与完整性，
-        不一致/缺代才重建物化（per-gen env 各代隔离，正常路径零操作）。
+        per-gen env 各代隔离，正常路径零操作（单形态，无发行级 env sync）。
         """
-        if mode == "packages":
-            self._sync_generation(distro, ver, force=force)
-            return
-        layout = DistroLayout(root=self._root / distro)
-        tree = layout.versions / ver
-        fingerprint = self._deps_fingerprint(tree)
-        fp_path = layout.env / ".deps-fingerprint"
-        fp_old = fp_path.read_text(encoding="utf-8").strip() if fp_path.is_file() else None
-        needs = force or fp_old != fingerprint
-        if needs:
-            env = {**os.environ, "UV_PROJECT_ENVIRONMENT": str(layout.venv)}
-            self._run(["uv", "sync"], cwd=tree, env=env)
-            self._remove_editable_artifacts(layout.venv)
-            self._run(["pnpm", "install"], cwd=tree)
-        if needs or not verify_managed_pth(layout.venv, layout.current):
-            write_managed_pth(layout.venv, layout.current)
-        if not needs:
-            return
-        fp_path.parent.mkdir(parents=True, exist_ok=True)
-        fp_path.write_text(fingerprint + "\n", encoding="utf-8")
-        py = layout.venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        # 断言导入路径源头含 current 段：__file__ 会被 realpath 解析成 versions/<ver>/...，
-        # 故校验 sys.path 中的字面 current 段（.pth 未被 editable 工件遮蔽）。
-        code = (
-            "import sys, ghrah.core; "
-            "hits = [p for p in sys.path if 'current' in p and 'ghrah-core' in p]; "
-            "print('OK' if hits and ghrah.core.__file__ in "
-            "{p + '/ghrah/core/__init__.py' for p in hits} else 'BAD')"
-        )
-        cp = self._run(
-            [str(py), "-c", code],
-            cwd=tree,
-            check=False,
-        )
-        if cp.returncode != 0 or cp.stdout.strip() != "OK":
-            raise RuntimeRefError(
-                "自管 .pth 断言失败：ghrah.core 导入未经 current 段"
-                f"（stdout={cp.stdout.strip()!r}）"
-            )
+        self._sync_generation(distro, ver, force=force)
 
     def _sync_generation(self, distro: str, ver: str, *, force: bool) -> None:
         """代复核：指纹与完整性均达标即零操作；否则按代声明重建物化。"""
@@ -860,40 +724,7 @@ class RuntimeRefManager:
             logger.warning("代指纹/完整性不达标，重建物化: %s", gen_dir)
             materialize_generation(self._root / distro, base_tree, spec, rebuild=True)
 
-    def _deps_fingerprint(self, tree: Path) -> str:
-        """sha256(uv.lock + 根 pyproject.toml + ghrah-*/pyproject.toml + pnpm-lock.yaml)。"""
-        rels = ["uv.lock", "pyproject.toml", "pnpm-lock.yaml"]
-        files = [tree / r for r in rels]
-        files += sorted(tree.glob("ghrah-*/pyproject.toml"))
-        digest = hashlib.sha256()
-        for path in sorted(files):
-            if not path.is_file():
-                continue
-            digest.update(str(path.relative_to(tree)).encode("utf-8"))
-            digest.update(path.read_bytes())
-        return digest.hexdigest()
-
-    def _remove_editable_artifacts(self, venv: Path) -> None:
-        """删除 site-packages 内引用 ghrah 包的 editable 工件。
-
-        覆盖两种形态（计划 §五 R1 风险的实测落地）：
-        - setuptools：``__editable__.<pkg>-<ver>.pth``（spike 时代形态）；
-        - uv：``_editable_impl_<pkg>.pth``（内容为版本树绝对路径，
-          按名排序先于自管 ``ghrah_bootloader_managed.pth`` 处理，
-          会遮蔽 current 段——必须清除）。
-        """
-        site = managed_pth_path(venv).parent
-        for artifact in site.glob("*editable*"):
-            if artifact.name == "ghrah_bootloader_managed.pth":
-                continue
-            try:
-                content = artifact.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                content = ""
-            if "ghrah" in artifact.name.lower() or "ghrah" in content:
-                artifact.unlink(missing_ok=True)
-
-    # ── boot.toml 写入与回退（D5/D7/D12） ──
+    # ── boot.toml 写入与回退 ──
 
     def _write_boot_toml(
         self, boot_before: BootToml, old: BootEntry | None, new: BootEntry
@@ -906,14 +737,11 @@ class RuntimeRefManager:
             last_good = new.label
         BootToml(default=new.label, fallback=fallback, last_good=last_good).save(self._root)
 
-    def _rollback(
-        self, distro: str, old: BootEntry | None, boot_before: BootToml, *, mode: str = "worktree"
-    ) -> None:
+    def _rollback(self, distro: str, old: BootEntry | None, boot_before: BootToml) -> None:
         distro_root = self._root / distro
         if old is not None:
-            segment = "generations" if old.kind == "generation" else None
-            repoint_current(distro_root, old.version, segment=segment)
-            self._sync(distro, old.version, force=mode == "worktree", mode=mode)
+            repoint_current(distro_root, old.version)
+            self._sync(distro, old.version, force=True)
         else:
             current = distro_root / "current"
             with contextlib.suppress(OSError):

@@ -377,7 +377,7 @@ class TestBuildIntegration:
         assert (tmp_path / "b" / "BOOTSTRAP.toml").is_file()
 
 
-# ── C4/W4：pnpm 调用统一（nt 模拟，纯 mock 命令形态） ────────
+# ── pnpm 调用统一（nt 模拟，纯 mock 命令形态） ────────
 
 
 class TestW4PnpmCommandForm:

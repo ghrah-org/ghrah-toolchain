@@ -2,7 +2,7 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""组合代物化测试（B3：gen_id / canonical 指纹 / 物化机械 / 读取与完整性）。
+"""组合代物化测试（gen_id / canonical 指纹 / 物化机械 / 读取与完整性）。
 
 不跑真实 uv/pnpm：子进程层 monkeypatch 拦截并记录命令，副作用以最小骨架
 物化（venv 解释器 + node_modules）。

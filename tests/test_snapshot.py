@@ -2,7 +2,7 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""数据盘快照测试（批次 3）：拍取含 WAL/SHM、META 字段、N 代滚动、恢复往返。"""
+"""数据盘快照测试：拍取含 WAL/SHM、META 字段、N 代滚动、恢复往返。"""
 
 from __future__ import annotations
 

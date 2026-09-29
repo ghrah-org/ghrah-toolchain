@@ -2,10 +2,14 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""ref 状态机测试（批次 2/3：源解析 / 版本命名 / 切换顺序 / 原子性 / 锁）。
+"""ref 状态机测试（源解析 / 版本命名 / 切换顺序 / 原子性 / 锁 / 平台分派）。
 
-真实 git 子进程 + 临时 ``GHRAH_HOME``；``_sync`` / ``_gate`` / ``_run``
-可 monkeypatch（避免真实 uv/pnpm 物化）。
+packages：真实 git 子进程 + 临时 ``GHRAH_HOME``；
+``build_artifacts`` / ``materialize_generation`` / ``_gate_generation`` 以假实现
+替换（避免真实构建与装配），``_sync`` 可 monkeypatch。
+
+形态无关的状态机语义（候选解析 / 命名 / 复用 / 锁 / 回滚骨架）在此锁定；
+packages 全链路断言主阵地在 ``test_install_packages.py``。
 """
 
 from __future__ import annotations
@@ -79,14 +83,11 @@ def repo(tmp_path: Path) -> Path:
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path) -> Path:
     h = tmp_path / "ghrah-home"
     monkeypatch.setenv("GHRAH_HOME", str(h))
-    # 既有用例锁定 worktree 链路（回归面）：预写显式模式的 distro.toml，
-    # 绕过缺省 packages（B2 翻转缺省后旧用例的 ensure 会走构建分支）。
     distro_root = h / "generic"
     distro_root.mkdir(parents=True)
     (distro_root / "distro.toml").write_text(
         f"""
 [distro]
-install_mode = "worktree"
 
 [distro.repo]
 path = "{repo}"
@@ -101,12 +102,77 @@ def _mgr(home: Path, repo: Path) -> RuntimeRefManager:
 
 
 def _mock_sync_gate(mgr: RuntimeRefManager, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(mgr, "_gate", lambda tree, level, mode="worktree": "passed")
-    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False, mode="worktree": None)
+    monkeypatch.setattr(mgr, "_gate", lambda gen_dir, level: "passed")
+    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False: None)
 
 
 def _entry(version: str, commit: str = "cafe0000") -> BootEntry:
     return BootEntry(distro="generic", version=version, path=Path("/x"), commit=commit)
+
+
+# ── 假构建/物化基础设施（形态无关状态机用例复用） ────────────
+
+
+def _materialize_fake_artifacts(tree: Path, commit: str) -> None:
+    """物化最小产物树骨架（身份面 + 清单面）。"""
+    tree.mkdir(parents=True, exist_ok=True)
+    (tree / "wheels").mkdir(exist_ok=True)
+    (tree / "wheels" / "pins.txt").write_text("third-party-pins\n", encoding="utf-8")
+    (tree / "BOOTSTRAP.toml").write_text(
+        f'[bootstrap]\nsource_commit = "{commit}"\nbuilt_at = "2026-09-25T00:00:00Z"\n',
+        encoding="utf-8",
+    )
+
+
+def _materialize_fake_generation(gen_dir: Path, spec) -> None:
+    """物化最小代骨架（GENERATION + 指纹 + env 完整性探针所需文件）。"""
+    from ghrah_bootloader.materialize import (
+        FINGERPRINT_NAME,
+        GENERATION_TOML,
+        generation_fingerprint,
+        render_generation_toml,
+    )
+
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    py = gen_dir / "env" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    py.parent.mkdir(parents=True, exist_ok=True)
+    py.write_text("#!/bin/sh\n", encoding="utf-8")
+    if os.name != "nt":
+        py.chmod(0o755)
+    (gen_dir / "env" / "node" / "node_modules").mkdir(parents=True, exist_ok=True)
+    (gen_dir / GENERATION_TOML).write_text(
+        render_generation_toml(spec, built_at="2026-09-25T00:00:00Z"), encoding="utf-8"
+    )
+    (gen_dir / FINGERPRINT_NAME).write_text(generation_fingerprint(spec) + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def fake_build(monkeypatch: pytest.MonkeyPatch, repo: Path):
+    """假构建/物化/门禁：记录调用、物化骨架；可注入失败。"""
+    calls: dict[str, list] = {"build": [], "materialize": []}
+    fail: dict[str, Exception | None] = {"build": None, "materialize": None}
+
+    def _build(repo_path, commit, *, out_dir):
+        calls["build"].append((commit, Path(out_dir)))
+        if fail["build"] is not None:
+            raise fail["build"]
+        _materialize_fake_artifacts(Path(out_dir), commit)
+
+    def _materialize(distro_root, base_tree, spec, *, rebuild=False):
+        calls["materialize"].append((Path(base_tree), spec.gen_id(), rebuild))
+        if fail["materialize"] is not None:
+            raise fail["materialize"]
+        _materialize_fake_generation(Path(distro_root) / "generations" / spec.gen_id(), spec)
+
+    def _gate_generation(self_or_dir, gen_dir=None):
+        calls.setdefault("gate", []).append(Path(gen_dir if gen_dir is not None else self_or_dir))
+
+    import ghrah_bootloader.runtime_ref as rr
+
+    monkeypatch.setattr(rr, "materialize_generation", _materialize)
+    monkeypatch.setattr(rr, "build_artifacts", _build)
+    monkeypatch.setattr(RuntimeRefManager, "_gate_generation", _gate_generation)
+    return type("FakeBuild", (), {"calls": calls, "fail": fail})()
 
 
 # ── RefSource ───────────────────────────────────────────────
@@ -126,7 +192,7 @@ def test_refsource_parse_rejects_invalid() -> None:
             RefSource.parse(bad)
 
 
-# ── 源解析（D9/D10） ─────────────────────────────────────────
+# ── 源解析 ─────────────────────────────────────────
 
 
 def test_resolve_candidate_latest(repo: Path) -> None:
@@ -199,9 +265,6 @@ def test_repo_priority_cli_env_toml(
     distro_root.mkdir(parents=True, exist_ok=True)
     (distro_root / "distro.toml").write_text(
         f"""
-[distro]
-install_mode = "worktree"
-
 [distro.repo]
 path = "{other}"
 """,
@@ -221,16 +284,13 @@ path = "{other}"
 
 
 def test_ensure_source_falls_back_to_toml(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, repo: Path, fake_build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     head = _git(repo, "rev-parse", "HEAD")
     distro_root = home / "generic"
     distro_root.mkdir(parents=True, exist_ok=True)
     (distro_root / "distro.toml").write_text(
         f"""
-[distro]
-install_mode = "worktree"
-
 [distro.repo]
 path = "{repo}"
 
@@ -240,30 +300,23 @@ source = "commit:{head}"
         encoding="utf-8",
     )
     mgr = RuntimeRefManager(root=home)
-    _mock_sync_gate(mgr, monkeypatch)
     entry = mgr.ensure(distro="generic")
     assert entry.commit == head
 
 
-# ── 版本命名与复用（D1） ─────────────────────────────────────
+# ── 版本命名与复用 ─────────────────────────────────────
 
 
-def test_version_name_derived_from_commit_date(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_version_name_derived_from_commit_date(home: Path, repo: Path, fake_build) -> None:
     mgr = _mgr(home, repo)
-    _mock_sync_gate(mgr, monkeypatch)
     entry = mgr.ensure(distro="generic")
     assert entry.version == "2026.09"
     assert (home / "generic" / "versions" / "2026.09").is_dir()
     assert (home / "generic" / "current").resolve().name == "2026.09"
 
 
-def test_version_name_collision_appends_short_sha(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_version_name_collision_appends_short_sha(home: Path, repo: Path, fake_build) -> None:
     mgr = _mgr(home, repo)
-    _mock_sync_gate(mgr, monkeypatch)
     first = mgr.ensure(distro="generic")
     second_commit = _commit(repo, "b", "2026-09-20T10:00:00 +0000")
     second = mgr.ensure(distro="generic", source=f"commit:{second_commit}")
@@ -273,11 +326,8 @@ def test_version_name_collision_appends_short_sha(
     assert len(DistroLayout(root=home / "generic").list_versions()) == 2
 
 
-def test_installed_commit_reuses_tree(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_installed_commit_reuses_tree(home: Path, repo: Path, fake_build) -> None:
     mgr = _mgr(home, repo)
-    _mock_sync_gate(mgr, monkeypatch)
     head = _git(repo, "rev-parse", "HEAD")
     first = mgr.ensure(distro="generic")
     again = mgr.ensure(distro="generic", source=f"commit:{head}")
@@ -286,11 +336,10 @@ def test_installed_commit_reuses_tree(
 
 
 def test_explicit_version_name_collision_suffixed_then_rejected(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, repo: Path, fake_build
 ) -> None:
     """显式名同名不同 commit：追加短 sha 落位；短 sha 名也被占用（不同 commit）→ 报错。"""
     mgr = _mgr(home, repo)
-    _mock_sync_gate(mgr, monkeypatch)
     mgr.ensure(distro="generic", version="myver")
     other = _commit(repo, "b", "2026-09-20T10:00:00 +0000")
     second = mgr.ensure(distro="generic", version="myver", source=f"commit:{other}")
@@ -309,13 +358,14 @@ def test_explicit_version_name_collision_suffixed_then_rejected(
 # ── list_entries / resolve ───────────────────────────────────
 
 
-def test_list_entries_and_resolve(home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_list_entries_and_resolve(home: Path, repo: Path, fake_build) -> None:
     mgr = _mgr(home, repo)
-    _mock_sync_gate(mgr, monkeypatch)
     entry = mgr.ensure(distro="generic")
     entries = mgr.list_entries()
-    assert [e.label for e in entries] == [entry.label]
-    assert entries[0].commit == entry.commit
+    # versions（基座产物库）+ generations（代）双段枚举
+    assert entry.label in [e.label for e in entries]
+    gen_entry = next(e for e in entries if e.kind == "generation")
+    assert gen_entry.commit == entry.commit
     assert mgr.resolve("generic").label == entry.label
 
 
@@ -331,19 +381,23 @@ def test_resolve_current_escape_rejected(home: Path, repo: Path) -> None:
     outside.mkdir()
     (home / "generic" / "current").symlink_to(outside)
     mgr = _mgr(home, repo)
-    with pytest.raises(RuntimeRefError, match="versions/ 或 generations/ 之外"):
+    with pytest.raises(RuntimeRefError, match="generations/ 之外"):
         mgr.resolve("generic")
 
 
-# ── 切换顺序（D5） ──────────────────────────────────────────
+# ── 切换顺序 ──────────────────────────────────────────
+
+
+def _raising_gate(gen_dir, level):
+    raise GateError("门禁注入失败")
 
 
 def test_gate_failure_leaves_state_untouched(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, repo: Path, fake_build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mgr = _mgr(home, repo)
     snapped: list[str] = []
-    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False, mode="worktree": None)
+    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False: None)
     monkeypatch.setattr(mgr, "_gate", _raising_gate)
     monkeypatch.setattr(mgr, "_snapshot", lambda *a, **k: snapped.append("snap"))
     with pytest.raises(GateError):
@@ -351,23 +405,18 @@ def test_gate_failure_leaves_state_untouched(
     layout = DistroLayout(root=home / "generic")
     assert not layout.current.exists()
     assert layout.list_versions() == []  # 本次新建树被移除
+    assert layout.list_generations() == []  # 本次新建代被移除
     assert snapped == []  # 未拍快照
     assert BootToml.load(home).default is None  # boot.toml 未动
 
 
-def _raising_gate(tree, level, mode="worktree"):
-    raise GateError("门禁注入失败")
-
-
 def test_switch_order_gate_snapshot_repoint(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, repo: Path, fake_build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mgr = _mgr(home, repo)
     order: list[str] = []
-    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False, mode="worktree": None)
-    monkeypatch.setattr(
-        mgr, "_gate", lambda tree, level, mode="worktree": order.append("gate") or "passed"
-    )
+    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False: None)
+    monkeypatch.setattr(mgr, "_gate", lambda gen_dir, level: order.append("gate") or "passed")
     monkeypatch.setattr(mgr, "_snapshot", lambda *a, **k: order.append("snapshot") or None)
     real_repoint = repoint_current
     monkeypatch.setattr(
@@ -385,37 +434,36 @@ def test_switch_order_gate_snapshot_repoint(
 
 
 def test_sync_failure_rolls_back_atomically(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, repo: Path, fake_build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mgr = _mgr(home, repo)
-    monkeypatch.setattr(mgr, "_gate", lambda tree, level, mode="worktree": "passed")
+    monkeypatch.setattr(mgr, "_gate", lambda gen_dir, level: "passed")
     monkeypatch.setattr(mgr, "_snapshot", lambda *a, **k: None)
-    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False, mode="worktree": None)
+    monkeypatch.setattr(mgr, "_sync", lambda distro, ver, *, force=False: None)
     first = mgr.ensure(distro="generic")
     second_commit = _commit(repo, "b", "2026-09-20T10:00:00 +0000")
 
     calls: list[tuple[str, bool]] = []
 
-    def failing_sync(distro, ver, *, force=False, mode="worktree"):
+    def failing_sync(distro, ver, *, force=False):
         calls.append((ver, force))
         if not force:
-            raise RuntimeError("uv sync 模拟失败")
+            raise RuntimeError("代复核模拟失败")
 
     monkeypatch.setattr(mgr, "_sync", failing_sync)
     with pytest.raises(RuntimeRefError, match="已回退"):
         mgr.ensure(distro="generic", source=f"commit:{second_commit}")
     layout = DistroLayout(root=home / "generic")
     assert layout.current.resolve().name == first.version  # 重指回旧版本
-    assert (first.version, True) in calls  # 旧版本被强制重 sync
+    assert (first.version, True) in calls  # 旧版本被强制复核
     assert layout.list_versions() == [first.version]  # 新建树已移除
     assert BootToml.load(home).default == first.label  # boot.toml 回写
 
 
 def test_first_install_no_snapshot_and_sets_last_good(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, repo: Path, fake_build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mgr = _mgr(home, repo)
-    _mock_sync_gate(mgr, monkeypatch)
     snapped: list[str] = []
     monkeypatch.setattr(mgr, "_snapshot", lambda *a, **k: snapped.append("snap"))
     entry = mgr.ensure(distro="generic")
@@ -428,25 +476,21 @@ def test_first_install_no_snapshot_and_sets_last_good(
     assert boot.last_good == entry.label
 
 
-# ── 锁与运行中拒绝（D8/D14） ─────────────────────────────────
+# ── 锁与运行中拒绝 ─────────────────────────────────
 
 
 def test_lock_blocks_concurrent_ensure(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, repo: Path, fake_build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mgr = _mgr(home, repo)
-    _mock_sync_gate(mgr, monkeypatch)
     distro_root = home / "generic"  # home 夹具已预建（含 distro.toml）
     with acquire_distro_lock(distro_root):
         with pytest.raises(RuntimeRefError, match="锁"):
             mgr.ensure(distro="generic")
 
 
-def test_stale_lock_with_dead_pid_recycled(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_stale_lock_with_dead_pid_recycled(home: Path, repo: Path, fake_build) -> None:
     mgr = _mgr(home, repo)
-    _mock_sync_gate(mgr, monkeypatch)
     distro_root = home / "generic"
     distro_lock_path(distro_root).write_text("999999999", encoding="utf-8")
     entry = mgr.ensure(distro="generic")  # 陈旧锁（死 pid）被回收
@@ -461,15 +505,14 @@ def test_rejects_when_running(home: Path, repo: Path, monkeypatch: pytest.Monkey
 
 
 def test_update_requires_existing_install(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, repo: Path, fake_build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mgr = _mgr(home, repo)
-    _mock_sync_gate(mgr, monkeypatch)
     with pytest.raises(RuntimeRefError, match="尚未安装"):
         mgr.ensure(distro="generic", update=True)
 
 
-# ── gate 级别（§六） ─────────────────────────────────────────
+# ── gate 级别 ─────────────────────────────────────────
 
 
 def test_gate_full_and_data_rejected(home: Path, repo: Path) -> None:
@@ -481,16 +524,16 @@ def test_gate_full_and_data_rejected(home: Path, repo: Path) -> None:
         mgr._gate(Path("/tmp"), "weird")
 
 
-# ── 身份双跳（B2：显示面 BOOTSTRAP → git → None） ────────────
+# ── 身份（BOOTSTRAP-only，无 git 回退） ────────────────
 
 
-def test_tree_commit_dual_protocol(home: Path, repo: Path) -> None:
+def test_tree_commit_bootstrap_only(home: Path, repo: Path) -> None:
     from ghrah_bootloader.build import read_source_commit
 
     mgr = _mgr(home, repo)
     versions = home / "generic" / "versions"
 
-    # 产物形态树（有 BOOTSTRAP 无 .git）→ BOOTSTRAP 值优先
+    # 产物形态树（有 BOOTSTRAP 无 .git）→ BOOTSTRAP 值
     pkg_tree = versions / "2026.09"
     (pkg_tree / "wheels").mkdir(parents=True)
     (pkg_tree / "BOOTSTRAP.toml").write_text(
@@ -499,16 +542,16 @@ def test_tree_commit_dual_protocol(home: Path, repo: Path) -> None:
     assert read_source_commit(pkg_tree) == "a" * 40
     assert mgr._tree_commit(pkg_tree) == "a" * 40
 
-    # worktree 形态树（无 BOOTSTRAP 有 .git）→ git 值
+    # git 回退已退役——worktree 形态树（无 BOOTSTRAP）不再回退取 git 值
     wt_tree = versions / "2026.09-wt"
     _git(repo, "worktree", "add", "--detach", str(wt_tree), "HEAD")
     try:
         assert read_source_commit(wt_tree) is None
-        assert mgr._tree_commit(wt_tree) == _git(repo, "rev-parse", "HEAD")
+        assert mgr._tree_commit(wt_tree) is None  # 无 git 回退
     finally:
         _git(repo, "worktree", "remove", "--force", str(wt_tree))
 
-    # 双缺目录 → None；损坏 BOOTSTRAP → 回退 git/None
+    # 双缺目录 → None；损坏 BOOTSTRAP → None
     bare = versions / "2026.09-bare"
     bare.mkdir()
     assert mgr._tree_commit(bare) is None
@@ -519,64 +562,7 @@ def test_tree_commit_dual_protocol(home: Path, repo: Path) -> None:
     assert mgr._tree_commit(broken) is None
 
 
-# ── 自管 .pth 接线（D3） ─────────────────────────────────────
-
-
-def _fake_installed_env(home: Path) -> tuple[Path, Path]:
-    """物化假发行版：树 + venv site-packages（含 ghrah editable 工件）+ current。"""
-    distro_root = home / "generic"
-    tree = distro_root / "versions" / "2026.09"
-    site = distro_root / "env" / ".venv" / "lib" / "python3.99" / "site-packages"
-    site.mkdir(parents=True)
-    # setuptools 形态（spike 时代）与 uv 形态（0.10.x 实测：_editable_impl_<pkg>.pth，
-    # 内容为版本树绝对路径，会遮蔽 current 段——真实集成用例暴露）
-    (site / "__editable__.ghrah_core-0.1.0.pth").write_text(str(tree), encoding="utf-8")
-    (site / "_editable_impl_ghrah_core.pth").write_text(str(tree), encoding="utf-8")
-    (site / "__editable__.other_pkg-1.0.pth").write_text("/elsewhere", encoding="utf-8")
-    tree.mkdir(parents=True, exist_ok=True)
-    for rel in ("uv.lock", "pyproject.toml", "pnpm-lock.yaml"):
-        (tree / rel).write_text(rel, encoding="utf-8")
-    repoint_current(distro_root, "2026.09")
-    return distro_root / "env" / ".venv", site
-
-
-def test_sync_writes_managed_pth_and_cleans_editable(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    venv, site = _fake_installed_env(home)
-    mgr = _mgr(home, repo)
-    cmds: list[list[str]] = []
-
-    def fake_run(cmd, cwd=None, env=None, check=True):
-        cmds.append([str(c) for c in cmd])
-        stdout = ""
-        if any("ghrah.core" in part and "sys.path" in part for part in cmd):
-            stdout = "OK"
-        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
-
-    monkeypatch.setattr(mgr, "_run", fake_run)
-    mgr._sync("generic", "2026.09")
-    assert any(c[0] == "uv" and "sync" in c for c in cmds)  # 指纹变化 → 全量物化
-    assert any(c[0] == "pnpm" and "install" in c for c in cmds)
-    assert not (site / "__editable__.ghrah_core-0.1.0.pth").exists()  # ghrah 工件清理
-    assert not (site / "_editable_impl_ghrah_core.pth").exists()  # uv 形态同样清理
-    assert (site / "__editable__.other_pkg-1.0.pth").exists()  # 非 ghrah 工件保留
-    from ghrah_bootloader.layout import managed_pth_path, verify_managed_pth
-
-    current = home / "generic" / "current"
-    assert managed_pth_path(venv).is_file()
-    assert verify_managed_pth(venv, current) is True
-    assert (home / "generic" / "env" / ".deps-fingerprint").is_file()
-
-    # 指纹一致 → 跳过 uv/pnpm，仅复核 .pth
-    cmds.clear()
-    (managed_pth_path(venv)).write_text("/drifted\n", encoding="utf-8")
-    mgr._sync("generic", "2026.09")
-    assert not any(c[0] == "uv" for c in cmds)
-    assert verify_managed_pth(venv, current) is True  # 漂移被复核重写
-
-
-# ── C4/W1+W3：Windows 平台分派（nt 模拟，mock winproc 表面） ──
+# ── Windows 平台分派（nt 模拟，mock winproc 表面） ──
 
 
 def test_pid_alive_nt_dispatches_to_winproc(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -634,7 +620,7 @@ def test_lock_is_stale_three_valued(home: Path, monkeypatch: pytest.MonkeyPatch)
 def test_repoint_nt_dispatches_to_winproc(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """nt 下 _repoint_link 分派 winproc.repoint_dir_link（段透传为绝对目标）。"""
+    """nt 下 _repoint_link 分派 winproc.repoint_dir_link（段固定 generations）。"""
     from ghrah_bootloader import runtime_ref
     from ghrah_bootloader import winproc as winproc_mod
 
@@ -649,15 +635,11 @@ def test_repoint_nt_dispatches_to_winproc(
 
     monkeypatch.setattr(runtime_ref.os, "name", "nt", raising=False)
     monkeypatch.setattr(winproc_mod, "repoint_dir_link", fake_repoint)
-    with caplog_probe():
-        runtime_ref.repoint_current(distro_root, "2026.09", segment="generations")
+    runtime_ref.repoint_current(distro_root, "2026.09")
     assert calls == [(distro_root / "current", gen_dir.resolve())]
     # last-good 同分派
-    runtime_ref.repoint_last_good(distro_root, "2026.09", segment="generations")
+    runtime_ref.repoint_last_good(distro_root, "2026.09")
     assert calls[-1] == (distro_root / "last-good", gen_dir.resolve())
-    # segment=None 探测：generations 存在 → 仍以 generations 段传入
-    runtime_ref.repoint_current(distro_root, "2026.09")
-    assert calls[-1][1] == gen_dir.resolve()
 
 
 def test_repoint_nt_maps_winproc_error(
@@ -677,7 +659,7 @@ def test_repoint_nt_maps_winproc_error(
 
     monkeypatch.setattr(winproc_mod, "repoint_dir_link", bad_repoint)
     with pytest.raises(RuntimeRefError, match="重指 current 失败"):
-        runtime_ref.repoint_current(distro_root, "2026.09", segment="generations")
+        runtime_ref.repoint_current(distro_root, "2026.09")
 
 
 def test_repoint_posix_fast_path_unchanged(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -694,7 +676,7 @@ def test_repoint_posix_fast_path_unchanged(home: Path, monkeypatch: pytest.Monke
         "repoint_dir_link",
         lambda lnk, tgt: calls.append((lnk, tgt)) or "junction",
     )
-    runtime_ref.repoint_current(distro_root, "2026.09", segment="generations")
+    runtime_ref.repoint_current(distro_root, "2026.09")
     assert calls == []  # posix 不触 winproc
     link = distro_root / "current"
     assert link.is_symlink()
@@ -704,10 +686,3 @@ def test_repoint_posix_fast_path_unchanged(home: Path, monkeypatch: pytest.Monke
 
 def _assert_symlink_form(link: Path, expected: str) -> None:
     assert os.readlink(link) == expected
-
-
-def caplog_probe():
-    """no-op 上下文（占位：保持 nt 分派用例的日志断言面简洁）。"""
-    import contextlib
-
-    return contextlib.nullcontext()

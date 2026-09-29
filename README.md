@@ -12,7 +12,7 @@ ghrah AgentOS 安装/配置工具与引导器（独立包，CLI `ghrah-bootloade
 | 层 | 载体 | 职责 |
 | --- | --- | --- |
 | 引导器 | `ghrah-bootloader`（独立进程） | 安装 / 门禁 / spawn OS 与前端 / 监督 / 版本管理 |
-| OS | `ghrah-subject-server`（发行版 env 内，独立进程） | 运行 Subject + Core，承载 project/agent/session |
+| OS | `ghrah-subject-server`（代内 env，独立进程） | 运行 Subject + Core，承载 project/agent/session |
 | agent | Subject 内的 CoreUnit | 承载具体业务的智能体 |
 
 ## 安装域布局（`~/.ghrah`）
@@ -21,32 +21,33 @@ ghrah AgentOS 安装/配置工具与引导器（独立包，CLI `ghrah-bootloade
 ~/.ghrah/                              # 「磁盘」：用户级安装域
   boot.toml                            # GPT + 引导菜单：default / fallback / last_good
   <distro>/                            # 一个发行版 = 分区 + 配套数据盘
-    distro.toml                        # 声明：install_mode / repo / ref / gate / ports / [data]
+    distro.toml                        # 声明：repo / ref / gate / ports / [data]
     data/                              # ★ 数据盘（版本无关，切换版本不动这里）
       subject.db · taskstore.sqlite3 · manifests/ · projects/ · workspace/
     snapshots/<ts>-v<old>→v<new>/      # 切换前快照（META.toml + data/ 完整拷贝，N 代滚动）
     legacy/adopt-<ts>/                 # 旧数据认领归档与备份（确认后可删）
-    env/.venv                          # worktree 模式运行依赖（自管 .pth → current 段；
-                                       #   packages 模式不用——env 在各代内，B4.4 删除）
-    versions/<ver>/                    # 双形态（install_mode 决定）：
-                                       #   packages：B1 构建产物树（wheels/ tarballs/
-                                       #     observer-web/ manifest.json/ BOOTSTRAP.toml，
-                                       #     无 .git，身份 = BOOTSTRAP source_commit）
-                                       #   worktree：git worktree @ 固定 commit（纯代码）
-    generations/<gen-id>/              # ★ 组合代（packages 模式）：门禁与切换单元
-      GENERATION.toml                  #   基座 ver+commit、插件集（B3 恒空）、pins_sha256
+    versions/<ver>/                    # 基座产物树（构建产物，无 .git）：
+                                       #   wheels/ tarballs/ observer-web/
+                                       #   manifest.json BOOTSTRAP.toml
+                                       #   身份 = BOOTSTRAP source_commit
+    generations/<gen-id>/              # ★ 组合代：门禁与切换单元
+      GENERATION.toml                  #   基座 ver+commit、插件集（当前恒空）、pins_sha256
       .deps-fingerprint                #   canonical 内容哈希（排除 built_at）→ 复用判定
       env/.venv/                       #   基座 wheels + pins 平铺安装（uv，安装期零解析）
       env/node/                        #   webui shim（file: + pnpm.overrides）+ lock 固化
     cache/uv · cache/pnpm-store        # 内容寻址缓存（硬链接摊薄各代体量）
-    current -> generations/<gen-id>    # 稳定路径：切换 = 原子重指（packages）
-                                       #   worktree 域 → versions/<ver>（并存期双段兼容）
-    last-good -> generations/<gen-id>  # 已知良好组合（救援目标；worktree 域 → versions/）
+    current -> generations/<gen-id>    # 稳定路径：切换 = 原子重指
+    last-good -> generations/<gen-id>  # 已知良好组合（救援目标）
 ```
 
 安装域与数据域分离：版本树纯代码；数据落发行版级数据盘；boot 时数据有：
 （subject.db / taskstore / manifests / projects 模板 / workspace）+ 端口全部
 经 env 注入指向 `data/`，切换版本对数据面零影响。
+
+**单一安装形态**：版本树 = 构建产物树，其上物化组合代；
+运行依赖在**各代内**（`generations/<gen>/env/`），发行版级无 `env/`。
+引导目标恒为组合代（`current`/`last-good` 只指向 `generations/`）；
+`versions/` 是基座产物库（枚举显示面），不可引导。
 
 ## 功能流程
 
@@ -57,36 +58,32 @@ ghrah-bootloader install --distro generic --version 2026.09 \
   --ref commit:861ca39 --repo /path/to/ghrah-monorepo
 ```
 
-链路：解析候选 commit（`latest | branch:<n> | commit:<sha>`）→ 建版本树
-（install_mode 决定形态，见下）→ [packages] 物化组合代（per-gen env：
-`uv pip install` wheels+pins 平铺 + webui shim `pnpm install`）→ 门禁 basic
-（worktree：候选临时 env 冒烟；packages：**代 env 冒烟**（import 五包 +
-server 入口存在），绝不触碰 worktree 模式的发行版 `env/`）→（存在旧
-current 时）拍数据快照 → 原子重指 `current`（packages → `generations/<gen>`）
-→ 按需 sync（worktree：依赖指纹变化才 uv sync / pnpm install；packages：
-代复核——指纹一致零操作）→ 写 boot.toml → 首装设 last-good。
-任一步失败等于什么都没发生（current/env/boot.toml 原值，新建基座树与代移除）。
+链路：解析候选 commit（`latest | branch:<n> | commit:<sha>`）→ 建基座产物树
+（构建：wheels/tarballs/observer-web/manifest/BOOTSTRAP）→ 物化组合代
+（per-gen env：`uv pip install` wheels+pins 平铺 + webui shim `pnpm install`）
+→ 门禁 basic（**代 env 冒烟**：import 五包 + server 入口存在）→（存在旧
+current 时）拍数据快照 → 原子重指 `current` → 代复核（指纹一致零操作）
+→ 写 boot.toml → 首装设 last-good。
+任一步失败等于什么都没发生（current/boot.toml 原值，新建基座树与代移除）。
 
 版本名缺省取候选提交日期 `%Y.%m`；同月同名自动加短 sha（如 `2026.09-8c932b0`）。
 已装同 commit 复用既有树，不建重复目录。代名（gen-id）确定性：无插件 =
 基座版本名；同（基座 × 插件集）→ 同代 → 双层复用（零重建零物化）。
 
-#### 安装模式（`[distro] install_mode`，包管理化过渡）
+#### 迁移（worktree → packages）
 
-| 模式 | 版本树形态 | 组合代 | 门禁 | sync | 状态 |
-| --- | --- | --- | --- | --- | --- |
-| `packages`（缺省） | B1 构建产物树（无 `.git`） | `generations/<gen-id>/`（per-gen env） | 代 env 冒烟 | 代复核 | B3 起 |
-| `worktree` | `git worktree --detach` | 无（发行版级 `env/` + 自管 `.pth`） | 临时 env uv sync 冒烟 | 按需 uv/pnpm | 过渡保留（B4 删除） |
+`install_mode` 键与 worktree 安装形态**已退役**：`distro.toml` 若仍写
+`install_mode = "worktree"`，`load` 会显式报错（不静默容忍）。迁移步骤：
 
-- 新域零配置走 `packages`；存量 worktree 域显式写 `install_mode = "worktree"`
-  保持可 boot，迁移（重跑 install 建产物树与代 + 归档旧树）属 B4。
-- 一个域一种模式：翻转后旧形态树仍可枚举（doctor 双跳显示），但不参与
-  复用判定——同名 install 报「版本名冲突」（fail-closed，不静默混用）。
-- **中间态边界**：packages 域可安装/切换/枚举，代 env 已物化，但**暂不可
-  boot**（OS 入口经 current 进代 + webui 静态 serve 的接线属 B4）。
-- **webui 第三方依赖解析漂移（诚实声明）**：基座 manifest 只含 Python pin
-  集；webui 第三方依赖在代物化时由 pnpm 现场解析、以生成的 `pnpm-lock.yaml`
-  固化在代内——同代复用零解析，但换代可能拉到新的第三方版本（收束进 B6）。
+1. `ghrah-bootloader stop`（如在运行）；
+2. 删除 `distro.toml` 的 `install_mode` 键；
+3. `ghrah-bootloader install --distro <n>`（建产物树 + 组合代，自动重指）；
+4. 归档旧 worktree 树（`git worktree remove` + `prune`）与发行级 `env/`；
+5. `ghrah-bootloader boot` 验证；数据盘与快照全程不动。
+
+**webui 第三方依赖解析漂移（诚实声明）**：基座 manifest 只含 Python pin
+集；webui 第三方依赖在代物化时由 pnpm 现场解析、以生成的 `pnpm-lock.yaml`
+固化在代内——同代复用零解析，但换代可能拉到新的第三方版本。
 
 ### 2. 旧数据认领（一次性过渡）
 
@@ -106,10 +103,11 @@ ghrah-bootloader install --distro generic --adopt-legacy-data
 ghrah-bootloader boot [--no-webui] [--no-browser]   # 别名 start / webui
 ```
 
-spawn 发行版 env 的 `ghrah-subject-server`（cwd=`current/`，数据面 env 全量
-注入）+ 前端（`pnpm dev`，经 `current` 段解析到版本树）；健康检查通过后更新
-last-good；前台监督循环——OS 意外退出收束全部子进程以非零码退出，SIGINT/SIGTERM
-逆序优雅收束（webui → OS）。启动时写 `.boot.pid`，二次 boot 拒绝双启。
+spawn 代内 env 的 `ghrah-subject-server`（cwd=`current/`，数据面 env 全量
+注入）+ 前端（默认**静态 serve** 基座产物 `dist/`，index.html 响应注入 WS URL；
+`--webui-dev` 显式走开发域源码树）；健康检查通过后更新 last-good；前台监督循环——
+OS 意外退出收束全部子进程以非零码退出，SIGINT/SIGTERM 逆序优雅收束（webui → OS）。
+启动时写 `.boot.pid`，二次 boot 拒绝双启。
 
 ```bash
 ghrah-bootloader stop [--distro <n>]     # 另一终端优雅停止
@@ -125,9 +123,8 @@ ghrah-bootloader runtime status            # current / 候选 / 落后 / last_go
 ghrah-bootloader runtime update [--source <src>] [--gate basic] [--fetch]
 ```
 
-与 install 同一状态机（门禁 → 快照 → 重指 → 按需 sync）；worktree 域依赖
-指纹一致时切换是**纯重指**（自管 `.pth` 指向 `current` 段，重指即换导入源）；
-packages 域切换 = 换代（同组合复用零物化，重指 `current` → 代目录）。
+与 install 同一状态机（门禁 → 快照 → 重指 → 代复核）；切换 = 换代
+（同组合复用零物化，重指 `current` → 代目录）。
 
 ### 5. 救援
 
@@ -139,7 +136,7 @@ ghrah-bootloader boot --ref last-good --restore-snapshot [--yes]
 
 `--restore-snapshot` 恢复最近快照并重指 current 到 last-good；交互下二次确认，
 **明示损失快照之后的写入窗口**。注意：救援重指 current 后 `boot.toml default`
-不自动回写（每次 boot 告警提示差异），菜单对齐自动化属后续批次。
+不自动回写（每次 boot 告警提示差异），菜单对齐自动化尚未实现。
 
 ### 6. 诊断
 
@@ -148,7 +145,7 @@ ghrah-bootloader distro list    # 发行版与版本/组合代清单（代注明
 ghrah-bootloader doctor         # 布局 / default / current commit / 落后情况 / generations
 ```
 
-### 7. 构建发行物（包管理化 B1）
+### 7. 构建发行物（包管理化）
 
 ```bash
 ghrah-bootloader build --repo <monorepo> [--ref latest|branch:<n>|commit:<sha>] [--out <dir>]
@@ -166,7 +163,7 @@ manifest.json / BOOTSTRAP.toml），构建成功默认自动验证（sha256 完�
 | --- | --- |
 | Linux | 一级支持（主开发与验收平台） |
 | macOS | 支持（stop 的 `/proc` 护栏已守卫，无 `/proc` 时跳过并告警） |
-| Windows | **实验支持**（平台模拟验证；真机验收排 B4 后） |
+| Windows | **实验支持**（平台模拟验证；真机验收待执行） |
 
 ## 注意事项
 
@@ -179,7 +176,7 @@ manifest.json / BOOTSTRAP.toml），构建成功默认自动验证（sha256 完�
 - **签出源默认 `latest` 是全局最近 ref tip**（跨全部分支，可能取到 WIP）；
   生产/验收建议 `commit:` 钉死。
 - **`full` / `data` 门禁未启用**（调用即明确报错，不静默降级）；启动计数
-  自动回退、`config get/set`、`uninstall` 属后续批次。
+  自动回退、`config get/set`、`uninstall` 尚未实现。
 - 前端 dev 服务（vite）监听 IPv6 loopback `[::1]:<port>`，用 `127.0.0.1`
   探测会得到连接失败，属正常。
 - `distro.toml` 首装生成后手工调整（端口 / 数据盘 root / snapshot_keep）在
@@ -200,5 +197,4 @@ uv run pytest          # 单测（默认跳过 integration 标记的真实 sync 
 uv run ruff check . && uv run ruff format --check .
 ```
 
-测试可用 `GHRAH_HOME` 重定向安装域。真实域操作见
-`tasks/2026-09-24-ghrah-bootloader.md` §七/§九 验收记录。
+测试可用 `GHRAH_HOME` 重定向安装域；真实域操作请在隔离安装域中验证。

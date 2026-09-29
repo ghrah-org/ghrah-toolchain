@@ -8,7 +8,7 @@
   （由引导器切换前「运行中拒绝」护栏保证）。
 - ``snapshots/`` 永不进版本树；目录名 ``<ts>-v<old>→v<new>``（同秒冲突
   追加 ``~<n>`` 后缀，保持字典序 = 时间序）。
-- META.toml 手写序列化（仅标量键），不引入 TOML writer 依赖。
+- META.toml 手写序列化（仅标量键）。
 """
 
 from __future__ import annotations

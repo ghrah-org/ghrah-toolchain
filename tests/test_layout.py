@@ -2,7 +2,7 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""~/.ghrah 布局读写、toml 解析、缺省读容忍、.pth 自管、配置写入底座测试"""
+"""~/.ghrah 布局读写、toml 解析、缺省读容忍、配置写入底座测试"""
 
 from __future__ import annotations
 
@@ -16,12 +16,9 @@ from ghrah_bootloader.layout import (
     DistroToml,
     ghrah_root,
     list_distros,
-    managed_pth_path,
     render_distro_toml,
     resolve_distro_root,
     snapshots_dir,
-    verify_managed_pth,
-    write_managed_pth,
 )
 
 
@@ -71,7 +68,6 @@ def test_distro_toml_missing_returns_defaults(home: Path) -> None:
     distro_dir.mkdir(parents=True)
     d = DistroToml.load(distro_dir)
     assert d.name == ""
-    assert d.install_mode == "packages"  # 缺省新模型（B2 安全阀缺省翻转）
     assert d.ref_source == "latest"
     assert d.ref_gate == "basic"
     assert d.subject_port == 4112
@@ -79,7 +75,10 @@ def test_distro_toml_missing_returns_defaults(home: Path) -> None:
     assert d.snapshot_keep == 3
 
 
-def test_distro_toml_install_mode_worktree_readback(home: Path) -> None:
+def test_distro_toml_install_mode_worktree_retired(home: Path) -> None:
+    """install_mode = "worktree" 已退役 → load 显式报错（不静默容忍）。"""
+    from ghrah_bootloader.errors import LayoutError
+
     distro_dir = home / "generic"
     distro_dir.mkdir(parents=True)
     (distro_dir / "distro.toml").write_text(
@@ -89,10 +88,12 @@ install_mode = "worktree"
 """,
         encoding="utf-8",
     )
-    assert DistroToml.load(distro_dir).install_mode == "worktree"
+    with pytest.raises(LayoutError, match="已退役"):
+        DistroToml.load(distro_dir)
 
 
-def test_distro_toml_install_mode_invalid_rejected(home: Path) -> None:
+def test_distro_toml_install_mode_key_retired(home: Path) -> None:
+    """install_mode 键整体退役（任何值都报错，提示删除）。"""
     from ghrah_bootloader.errors import LayoutError
 
     distro_dir = home / "generic"
@@ -100,11 +101,11 @@ def test_distro_toml_install_mode_invalid_rejected(home: Path) -> None:
     (distro_dir / "distro.toml").write_text(
         """
 [distro]
-install_mode = "hybrid"
+install_mode = "packages"
 """,
         encoding="utf-8",
     )
-    with pytest.raises(LayoutError, match="非法 install_mode"):
+    with pytest.raises(LayoutError, match="已退役"):
         DistroToml.load(distro_dir)
 
 
@@ -181,8 +182,6 @@ def test_distro_layout_paths(home: Path) -> None:
     assert layout.distro_toml == home / "generic" / "distro.toml"
     assert layout.data == home / "generic" / "data"
     assert layout.snapshots == home / "generic" / "snapshots"
-    assert layout.env == home / "generic" / "env"
-    assert layout.venv == home / "generic" / "env" / ".venv"
     assert layout.current == home / "generic" / "current"
     assert layout.last_good == home / "generic" / "last-good"
     assert layout.versions == home / "generic" / "versions"
@@ -202,68 +201,7 @@ def test_list_versions_sorted(home: Path) -> None:
     assert layout.list_versions() == ["2026.09", "2026.10"]
 
 
-# ── .pth 自管（裁定 11） ──────────────────────────────────────
-
-
-def _make_venv(tmp_path: Path) -> Path:
-    import sys
-
-    venv = tmp_path / ".venv"
-    if sys.platform == "win32":
-        site = venv / "Lib" / "site-packages"
-    else:
-        site = (
-            venv
-            / "lib"
-            / f"python{sys.version_info.major}.{sys.version_info.minor}"
-            / "site-packages"
-        )
-    site.mkdir(parents=True)
-    return venv
-
-
-def test_write_and_verify_managed_pth(tmp_path: Path) -> None:
-    """写入自管 .pth 后应可复核一致；current 重指后复核应失败（需重写）。"""
-    venv = _make_venv(tmp_path)
-    current = tmp_path / "current"
-    current.mkdir()
-
-    pth = write_managed_pth(venv, current)
-    assert pth == managed_pth_path(venv)
-    assert verify_managed_pth(venv, current) is True
-
-    # current 重指（模拟版本切换）：.pth 内容仍指向 current 段（稳定路径），
-    # 复核仍应通过——这正是自管 .pth 的意义。
-    assert verify_managed_pth(venv, current) is True
-
-    # .pth 被篡改/缺失：复核失败
-    pth.write_text("/somewhere/else\n", encoding="utf-8")
-    assert verify_managed_pth(venv, current) is False
-    pth.unlink()
-    assert verify_managed_pth(venv, current) is False
-
-
-def test_managed_pth_contains_current_segment(tmp_path: Path) -> None:
-    """.pth 各行必须是含 current 段的稳定路径（不解析为版本绝对路径）。"""
-    venv = _make_venv(tmp_path)
-    current = tmp_path / "current"
-    current.mkdir()
-
-    pth = write_managed_pth(venv, current)
-    lines = [
-        line.strip()
-        for line in pth.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.startswith("#")
-    ]
-    assert len(lines) == 3
-    for line in lines:
-        assert str(current) in line
-        assert line.endswith("/src")
-    # 不允许出现 versions/<ver> 绝对路径（setuptools editable 的漂移形态）
-    assert all("versions" not in line for line in lines)
-
-
-# ── 配置写入底座（批次 2/3/6） ───────────────────────────────
+# ── 配置写入底座 ───────────────────────────────
 
 
 def test_boot_toml_save_roundtrip_and_atomic(home: Path) -> None:
@@ -313,7 +251,6 @@ def test_render_distro_toml_readback(home: Path) -> None:
     assert d.ref_source == "branch:main"
     assert d.ref_gate == "basic"
     assert d.ref_fetch_on_update is False
-    assert d.install_mode == "packages"  # 模板显式写缺省模式，load 可读回
     assert d.subject_port == 4112
     assert d.webui_port == 5173
     assert d.data_root == ""

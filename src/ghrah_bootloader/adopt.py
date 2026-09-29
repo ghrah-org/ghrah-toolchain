@@ -4,7 +4,7 @@
 
 """旧数据认领：``~/.ghrah`` 顶层遗留数据一次性移动进发行版数据盘。
 
-一次性过渡命令（``install --adopt-legacy-data``），语义（任务书批次 6 / §八）：
+一次性过渡命令（``install --adopt-legacy-data``），语义：
 
 - **移动非复制**：五项数据面（``subject.db``/``taskstore.sqlite3`` 各含
   -wal/-shm、``manifests/``、``projects/``）→ ``resolve_data_root()`` 派生

@@ -6,7 +6,7 @@
 
 全部经 mock（fake kernel32 / monkeypatch os.name / mock _winapi），锁定
 「我方代码路径」（判定表、调用序、复核与回退）；Windows API 签名的真机
-正确性属 B4 后验收面（计划 D8 诚实边界）。
+正确性属真机验收面（诚实边界）。
 """
 
 from __future__ import annotations

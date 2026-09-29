@@ -21,10 +21,9 @@ from pathlib import Path
 
 from ghrah_bootloader.errors import LayoutError
 
-_PTH_MARKER = "ghrah-bootloader-managed"
-_PACKAGE_DIRS = ("ghrah-core", "ghrah-protocol", "ghrah-subject")
-INSTALL_MODES = ("packages", "worktree")
-DEFAULT_INSTALL_MODE = "packages"
+# 已退役的安装模式键值：worktree 形态（git worktree 版本树 + 发行级 env + 自管
+# .pth）存量声明若仍写该值，load 显式报错而非静默容忍。
+_RETIRED_INSTALL_MODE = "worktree"
 
 # 数据面五项 env 常量（自 boot.py 迁入；boot.py 保留同名 re-export 视图）
 ENV_DB_PATH = "GHRAH_SUBJECT_DB_PATH"
@@ -99,7 +98,6 @@ class DistroToml:
 
     name: str = ""
     scenario: str = ""
-    install_mode: str = DEFAULT_INSTALL_MODE
     repo_path: str = ""
     ref_source: str = "latest"
     ref_gate: str = "basic"
@@ -126,15 +124,21 @@ class DistroToml:
         plugins = distro.get("plugins", {})
         runtime = data.get("runtime", {})
         data_section = data.get("data", {})
-        install_mode = str(distro.get("install_mode", DEFAULT_INSTALL_MODE))
-        if install_mode not in INSTALL_MODES:
+        install_mode = distro.get("install_mode")
+        if install_mode is not None:
+            if str(install_mode) == _RETIRED_INSTALL_MODE:
+                raise LayoutError(
+                    f"install_mode = {_RETIRED_INSTALL_MODE!r} 已退役："
+                    "worktree 安装形态不再支持；请删除该键（缺省即 packages 形态），"
+                    "迁移步骤见 README「迁移」段"
+                )
             raise LayoutError(
-                f"非法 install_mode: {install_mode!r}（应为 {' | '.join(INSTALL_MODES)}）"
+                f"install_mode 键已退役（收到 {install_mode!r}）；"
+                "请删除该键（缺省即 packages 形态），迁移步骤见 README「迁移」段"
             )
         return cls(
             name=str(distro.get("name", "")),
             scenario=str(distro.get("scenario", "")),
-            install_mode=install_mode,
             repo_path=str(repo.get("path", "")),
             ref_source=str(ref.get("source", "latest")),
             ref_gate=str(ref.get("gate", "basic")),
@@ -164,14 +168,6 @@ class DistroLayout:
     @property
     def snapshots(self) -> Path:
         return self.root / "snapshots"
-
-    @property
-    def env(self) -> Path:
-        return self.root / "env"
-
-    @property
-    def venv(self) -> Path:
-        return self.env / ".venv"
 
     @property
     def current(self) -> Path:
@@ -269,7 +265,6 @@ def render_distro_toml(
         "[distro]",
         f"name = {_toml_str(name)}",
         'scenario = ""',
-        f"install_mode = {_toml_str(DEFAULT_INSTALL_MODE)}",
         "",
         "[distro.repo]",
         f"path = {_toml_str(repo_path)}",
@@ -292,59 +287,3 @@ def render_distro_toml(
         lines.append(f"root = {_toml_str(data_root)}")
     lines.append(f"snapshot_keep = {snapshot_keep}")
     return "\n".join(lines) + "\n"
-
-
-# ── env 导入路径自管（裁定 11） ──────────────────────────────
-
-
-def managed_pth_path(venv: Path) -> Path:
-    """自管 .pth 在 venv site-packages 内的落点。"""
-    site_packages = _find_site_packages(venv)
-    return site_packages / "ghrah_bootloader_managed.pth"
-
-
-def write_managed_pth(venv: Path, current_link: Path) -> Path:
-    """写入/复核自管 .pth：使 venv 的导入路径经 ``current`` 稳定段指向运行树。
-
-    不依赖 setuptools editable 的 .pth 解析（spike 实证其解析为版本绝对路径，
-    重指 current 不生效）。内容为各包 src 目录（含 current 段的稳定路径）。
-    """
-    site_packages = _find_site_packages(venv)
-    lines = [
-        f"# {_PTH_MARKER}: do not edit; managed by ghrah-bootloader",
-    ]
-    for pkg in _PACKAGE_DIRS:
-        lines.append(str(current_link / pkg / "src"))
-    pth = site_packages / "ghrah_bootloader_managed.pth"
-    pth.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return pth
-
-
-def verify_managed_pth(venv: Path, current_link: Path) -> bool:
-    """复核 .pth 与 current 段一致；缺失或不一致返回 False（调用方应重写）。"""
-    pth = managed_pth_path(venv)
-    if not pth.is_file():
-        return False
-    expected = {str(current_link / pkg / "src") for pkg in _PACKAGE_DIRS}
-    actual = {
-        line.strip()
-        for line in pth.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.startswith("#")
-    }
-    return actual == expected
-
-
-def _find_site_packages(venv: Path) -> Path:
-    """定位 venv 的 site-packages（posix/lib/pythonX.Y/site-packages | nt/Lib/site-packages）。"""
-    if os.name == "nt":
-        candidate = venv / "Lib" / "site-packages"
-        if candidate.is_dir():
-            return candidate
-    else:
-        lib = venv / "lib"
-        if lib.is_dir():
-            for entry in sorted(lib.iterdir(), reverse=True):
-                candidate = entry / "site-packages"
-                if entry.name.startswith("python") and candidate.is_dir():
-                    return candidate
-    raise LayoutError(f"venv site-packages 未找到: {venv}")

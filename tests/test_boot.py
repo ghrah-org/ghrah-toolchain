@@ -2,7 +2,7 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""boot 编排测试（批次 1：out-of-process 引导）。
+"""boot 编排测试（out-of-process 引导）。
 
 覆盖：
 - 引导目标解析（current 指向、default 回退、--version 不一致拒绝、versions/ 逃逸拒绝）
@@ -39,17 +39,32 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _make_distro(root: Path, distro: str = "generic", version: str = "2026.09") -> DistroLayout:
-    """物化一个最小发行版布局：versions/<ver>/ 树 + current 重指 + distro.toml。"""
+def _make_gen(
+    root: Path, distro: str = "generic", gen: str = "2026.09", base: str = "2026.09"
+) -> DistroLayout:
+    """物化 packages 单形态布局：基座树 versions/<base> + 组合代 generations/<gen> + current → 代。
+
+    这是唯一形态：OS 入口在代内 env（``generations/<gen>/env/.venv``），
+    current 只指向组合代。
+    """
     distro_root = root / distro
-    tree = distro_root / "versions" / version
-    (tree / "ghrah-observer-webui" / "packages" / "observer-web").mkdir(parents=True)
-    bin_dir = tree.parent.parent / "env" / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    base_tree = distro_root / "versions" / base
+    (base_tree / "ghrah-observer-webui" / "packages" / "observer-web").mkdir(parents=True)
+    gen_dir = distro_root / "generations" / gen
+    bin_dir = gen_dir / "env" / ".venv" / ("Scripts" if os.name == "nt" else "bin")
     bin_dir.mkdir(parents=True)
     server = bin_dir / ("ghrah-subject-server.exe" if os.name == "nt" else "ghrah-subject-server")
     server.write_text("#!/bin/sh\nexit 0\n" if os.name != "nt" else "")
     if os.name != "nt":
         server.chmod(0o755)
+    (gen_dir / "GENERATION.toml").write_text(
+        "[generation]\n"
+        "schema_version = 1\n"
+        f'base_version = "{base}"\n'
+        'base_commit = "861ca39"\n'
+        'pins_sha256 = "00000000"\n',
+        encoding="utf-8",
+    )
     (distro_root / "distro.toml").write_text(
         f"""
 [distro]
@@ -62,8 +77,13 @@ webui_port = 5173
         encoding="utf-8",
     )
     current = distro_root / "current"
-    current.symlink_to(tree)
+    current.symlink_to(gen_dir)
     return DistroLayout(root=distro_root)
+
+
+def _make_distro(root: Path, distro: str = "generic", version: str = "2026.09") -> DistroLayout:
+    """物化一个最小发行版布局（packages 单形态；gen 名 = base 名 = version）。"""
+    return _make_gen(root, distro=distro, gen=version, base=version)
 
 
 # ── 数据面 env ───────────────────────────────────────────────
@@ -108,7 +128,7 @@ def test_resolve_boot_target_from_current(tmp_path: Path) -> None:
     target = resolve_boot_target("generic", None, root=tmp_path)
     assert target.distro == "generic"
     assert target.version == "2026.09"
-    assert target.tree == (tmp_path / "generic" / "versions" / "2026.09").resolve()
+    assert target.tree == (tmp_path / "generic" / "generations" / "2026.09").resolve()
     assert target.distro_toml.subject_port == 4112
 
 
@@ -143,7 +163,7 @@ def test_resolve_boot_target_version_mismatch_rejected(tmp_path: Path) -> None:
 
 
 def test_resolve_boot_target_current_escape_rejected(tmp_path: Path) -> None:
-    """current 指向受管段（versions/ ∪ generations/）之外的路径时拒绝引导。"""
+    """current 指向受管段（generations/）之外的路径时拒绝引导。"""
     from ghrah_bootloader.errors import BootloaderError
 
     _make_distro(tmp_path)
@@ -151,7 +171,7 @@ def test_resolve_boot_target_current_escape_rejected(tmp_path: Path) -> None:
     outside.mkdir()
     (tmp_path / "generic" / "current").unlink()
     (tmp_path / "generic" / "current").symlink_to(outside)
-    with pytest.raises(BootloaderError, match="versions/ 或 generations/ 之外"):
+    with pytest.raises(BootloaderError, match="generations/ 之外"):
         resolve_boot_target("generic", None, root=tmp_path)
 
 
@@ -172,7 +192,7 @@ def test_os_server_command_missing_binary(tmp_path: Path) -> None:
 
     layout = DistroLayout(root=tmp_path)
     with pytest.raises(BootloaderError, match="入口缺失"):
-        os_server_command(layout.venv)
+        os_server_command(layout.root / "env" / ".venv")
 
 
 # ── run_boot 端到端（真实子进程，mock OS 脚本） ───────────────
@@ -206,9 +226,13 @@ time.sleep(60)
 
 @pytest.fixture
 def distro_with_mock_os(tmp_path: Path):
-    """发行版布局 + 可执行的 mock OS server（记录 env 到 dump 文件）。"""
+    """发行版布局 + 可执行的 mock OS server（记录 env 到 dump 文件）。
+
+    单形态：mock OS 落在代内 env（``current/env/.venv/bin``）。
+    """
     layout = _make_distro(tmp_path)
-    bin_dir = layout.venv / ("Scripts" if os.name == "nt" else "bin")
+    bin_dir = layout.current / "env" / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    bin_dir.mkdir(parents=True, exist_ok=True)
     server = bin_dir / ("ghrah-subject-server.exe" if os.name == "nt" else "ghrah-subject-server")
     script_path = tmp_path / "os_server_script.py"
     script_path.write_text(_OS_SCRIPT_TEMPLATE, encoding="utf-8")
@@ -267,7 +291,7 @@ async def test_run_boot_env_injection_and_supervision(
 async def test_run_boot_os_exit_returns_failure(distro_with_mock_os) -> None:
     """OS 子进程意外退出 → run_boot 返回 1（其余子进程已收束）。"""
     root, layout = distro_with_mock_os
-    bin_dir = layout.venv / "bin"
+    bin_dir = layout.current / "env" / ".venv" / "bin"
     server = bin_dir / "ghrah-subject-server"
     # 覆写为「起健康端点后立即退出」的 OS
     port_holder = {"port": _free_port()}
@@ -311,13 +335,22 @@ async def _wait_dump(dump: Path, timeout: float = 15.0) -> None:
         await asyncio.sleep(0.2)
 
 
-# ── 救援与 known-good（批次 4） ──────────────────────────────
+# ── 救援与 known-good ────────────────────────────────────────
 
 
 def _add_version(root: Path, version: str) -> Path:
-    tree = root / "generic" / "versions" / version
-    tree.mkdir(parents=True, exist_ok=True)
-    return tree
+    """新增一个组合代目录（引导目标只认 generations/）。"""
+    gen = root / "generic" / "generations" / version
+    gen.mkdir(parents=True, exist_ok=True)
+    (gen / "GENERATION.toml").write_text(
+        "[generation]\n"
+        "schema_version = 1\n"
+        f'base_version = "{version}"\n'
+        'base_commit = "861ca39"\n'
+        'pins_sha256 = "00000000"\n',
+        encoding="utf-8",
+    )
+    return gen
 
 
 class _StubProc:
@@ -340,7 +373,7 @@ class _StubStack:
 
 
 def _make_last_good(root: Path, version: str = "2026.09") -> None:
-    (root / "generic" / "last-good").symlink_to(root / "generic" / "versions" / version)
+    (root / "generic" / "last-good").symlink_to(root / "generic" / "generations" / version)
 
 
 def _make_fake_snapshot(root: Path) -> Path:
@@ -358,10 +391,12 @@ def test_resolve_boot_target_ref_last_good_symlink(tmp_path: Path) -> None:
 
     _make_distro(tmp_path)
     _add_version(tmp_path, "2026.10")
-    (tmp_path / "generic" / "last-good").symlink_to(tmp_path / "generic" / "versions" / "2026.10")
+    (tmp_path / "generic" / "last-good").symlink_to(
+        tmp_path / "generic" / "generations" / "2026.10"
+    )
     target = resolve_boot_target("generic", "2026.09", root=tmp_path, ref="last-good")
     assert target.version == "2026.10"
-    assert target.tree == (tmp_path / "generic" / "versions" / "2026.10").resolve()
+    assert target.tree == (tmp_path / "generic" / "generations" / "2026.10").resolve()
     with pytest.raises(BootloaderError, match="仅接受 last-good"):
         resolve_boot_target("generic", None, root=tmp_path, ref="branch:main")
 
@@ -471,16 +506,13 @@ async def test_run_boot_updates_last_good_after_start(
     assert BootToml.load(root).last_good == "generic/2026.09"
 
 
-# ── 双段解析（B3.5：generations ∪ versions 并存期） ─────────
+# ── 双段解析（generations ∪ versions 并存期） ────────────────
 
 
 def test_resolve_boot_target_current_to_generation(tmp_path: Path) -> None:
     """packages 域 current → generations/<gen-id> 可解析引导。"""
     _make_distro(tmp_path)
     gen = tmp_path / "generic" / "generations" / "2026.09"
-    gen.mkdir(parents=True)
-    (tmp_path / "generic" / "current").unlink()
-    (tmp_path / "generic" / "current").symlink_to(gen)
     target = resolve_boot_target("generic", None, root=tmp_path)
     assert target.version == "2026.09"
     assert target.tree == gen.resolve()
@@ -503,7 +535,6 @@ def test_resolve_boot_target_ref_last_good_generation(tmp_path: Path) -> None:
     """--ref last-good：符号链接指向代目录时目标为该代。"""
     _make_distro(tmp_path)
     gen = tmp_path / "generic" / "generations" / "2026.09"
-    gen.mkdir(parents=True)
     (tmp_path / "generic" / "last-good").symlink_to(gen)
     target = resolve_boot_target("generic", None, root=tmp_path, ref="last-good")
     assert target.version == "2026.09"
@@ -525,7 +556,7 @@ def test_resolve_boot_target_ref_last_good_toml_generation(tmp_path: Path) -> No
     assert target.tree == gen.resolve()
 
 
-# ── B4 4.1：OS 入口经 current 进代（B1a-B1d） ─────────────────
+# ── OS 入口经 current 进代 ───────────────────────────────────
 
 
 def _server_entry(venv: Path) -> Path:
@@ -534,62 +565,24 @@ def _server_entry(venv: Path) -> Path:
     return os_server_entry(venv)
 
 
-def _make_gen(
-    root: Path, distro: str = "generic", gen: str = "2026.09", base: str = "2026.09"
-) -> DistroLayout:
-    """物化 packages 代形态布局：versions/<base> 基座树 + generations/<gen> 代 + current → 代。"""
-    layout = _make_distro(root, distro=distro, version=base)
-    gen_dir = root / distro / "generations" / gen
-    (gen_dir / "env" / ".venv").mkdir(parents=True)
-    (gen_dir / "GENERATION.toml").write_text(
-        "[generation]\n"
-        "schema_version = 1\n"
-        f'base_version = "{base}"\n'
-        'base_commit = "861ca39"\n'
-        'pins_sha256 = "00000000"\n',
-        encoding="utf-8",
-    )
-    (root / distro / "current").unlink()
-    (root / distro / "current").symlink_to(gen_dir)
-    return layout
-
-
 def test_resolve_os_server_prefers_current_gen_env(tmp_path: Path) -> None:
-    """B1a：代目标 OS 入口 = current/env/.venv（发行级入口在场仍取代内）。"""
+    """代目标 OS 入口 = current/env/.venv。"""
     from ghrah_bootloader.boot import resolve_os_server
 
     layout = _make_gen(tmp_path)
     gen_entry = _server_entry(layout.current / "env" / ".venv")
-    gen_entry.parent.mkdir(parents=True, exist_ok=True)
-    gen_entry.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    gen_entry.chmod(0o755)
     cmd = resolve_os_server(layout)
     assert cmd == [str(gen_entry)]
 
 
-def test_resolve_os_server_falls_back_to_distro_env_with_warning(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """B1b：过渡兜底——current 下无 env、发行级 venv 有入口 → 告警 + 旧路径命令。"""
-    import logging
-
-    from ghrah_bootloader.boot import resolve_os_server
-
-    layout = _make_distro(tmp_path)  # current → versions 树；发行级 venv 有入口
-    with caplog.at_level(logging.WARNING, logger="ghrah_bootloader.boot"):
-        cmd = resolve_os_server(layout)
-    assert cmd == [str(_server_entry(layout.venv))]
-    assert any("过渡兜底" in r.message for r in caplog.records)
-
-
-def test_resolve_os_server_missing_everywhere(tmp_path: Path) -> None:
-    """B1c：双缺失 → 报「发行版 env 未物化」语义等价错误。"""
+def test_resolve_os_server_missing_raises(tmp_path: Path) -> None:
+    """代内 env 入口缺失 → 报错（发行级兜底已退役）。"""
     from ghrah_bootloader.boot import resolve_os_server
     from ghrah_bootloader.errors import BootloaderError
 
-    layout = _make_distro(tmp_path)
-    _server_entry(layout.venv).unlink()
-    with pytest.raises(BootloaderError, match="未物化"):
+    layout = _make_gen(tmp_path)
+    _server_entry(layout.current / "env" / ".venv").unlink()
+    with pytest.raises(BootloaderError, match="当前代 env 未物化"):
         resolve_os_server(layout)
 
 
@@ -634,9 +627,8 @@ def gen_distro_with_mock_os(tmp_path: Path):
 async def test_run_boot_gen_form_env_injection_and_cwd(
     gen_distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """B1d：代形态 run_boot 端到端——OS 取代内 env（发行级入口已删）、env 六项、cwd=current。"""
+    """代形态 run_boot 端到端——OS 取代内 env（发行级入口已删）、env 六项、cwd=current。"""
     root, layout = gen_distro_with_mock_os
-    _server_entry(layout.venv).unlink()  # 兜底不可用：OS 必须来自代内 env
     dump = tmp_path / "os_gen_env.json"
     monkeypatch.setenv("BOOT_TEST_ENV_DUMP", str(dump))
     target = resolve_boot_target("generic", None, root=root)
@@ -666,11 +658,11 @@ async def test_run_boot_gen_form_env_injection_and_cwd(
     assert os_env["BOOT_TEST_CWD"] == str((root / "generic" / "generations" / "2026.09").resolve())
 
 
-# ── B4 4.2：webui 静态 serve / --webui-dev（B2a-B2c） ─────────
+# ── webui 静态 serve / --webui-dev ───────────────────────────
 
 
 def test_webui_static_root_gen_target(tmp_path: Path) -> None:
-    """B2a：代目标 → 基座 versions/<base>/observer-web/dist。"""
+    """代目标 → 基座 versions/<base>/observer-web/dist。"""
     from ghrah_bootloader.boot import webui_static_root
 
     _make_gen(tmp_path)
@@ -681,7 +673,7 @@ def test_webui_static_root_gen_target(tmp_path: Path) -> None:
 
 
 def test_webui_static_root_missing_dist_fail_closed(tmp_path: Path) -> None:
-    """B2a：代目标 dist 缺失 → fail-closed 报「基座产物不完整」。"""
+    """代目标 dist 缺失 → fail-closed 报「基座产物不完整」。"""
     from ghrah_bootloader.boot import webui_static_root
     from ghrah_bootloader.errors import BootloaderError
 
@@ -691,17 +683,21 @@ def test_webui_static_root_missing_dist_fail_closed(tmp_path: Path) -> None:
         webui_static_root(target)
 
 
-def test_webui_static_root_non_gen_returns_none(tmp_path: Path) -> None:
-    """B2a：非代目标（过渡期 versions 树）→ None（调用方走旧 dev 路径）。"""
+def test_webui_static_root_non_gen_rejected(tmp_path: Path) -> None:
+    """引导目标非组合代 → fail-closed（引导目标恒为代）。"""
     from ghrah_bootloader.boot import webui_static_root
+    from ghrah_bootloader.errors import BootloaderError
 
     _make_distro(tmp_path)
+    # 去掉代的 GENERATION.toml，使 read_generation 不命中
+    (tmp_path / "generic" / "generations" / "2026.09" / "GENERATION.toml").unlink()
     target = resolve_boot_target("generic", None, root=tmp_path)
-    assert webui_static_root(target) is None
+    with pytest.raises(BootloaderError, match="不是组合代"):
+        webui_static_root(target)
 
 
 def test_webui_dev_dir_explicit_arg_wins(tmp_path: Path) -> None:
-    """B2b：显式参 > repo 推导。"""
+    """显式参 > repo 推导。"""
     from ghrah_bootloader.boot import webui_dev_dir
 
     _make_distro(tmp_path)
@@ -716,7 +712,7 @@ def test_webui_dev_dir_explicit_arg_wins(tmp_path: Path) -> None:
 
 
 def test_webui_dev_dir_repo_derivation(tmp_path: Path) -> None:
-    """B2b：无显式参 → [distro.repo].path + 包路径推导。"""
+    """无显式参 → [distro.repo].path + 包路径推导。"""
     from ghrah_bootloader.boot import webui_dev_dir
 
     _make_distro(tmp_path)
@@ -731,7 +727,7 @@ def test_webui_dev_dir_repo_derivation(tmp_path: Path) -> None:
 
 
 def test_webui_dev_dir_unavailable_fail_closed(tmp_path: Path) -> None:
-    """B2b：显式参无效 / 均缺 → fail-closed，报错文案含处置提示（--webui-dev-dir）。"""
+    """显式参无效 / 均缺 → fail-closed，报错文案含处置提示（--webui-dev-dir）。"""
     from ghrah_bootloader.boot import webui_dev_dir
     from ghrah_bootloader.errors import BootloaderError
 
@@ -746,13 +742,12 @@ def test_webui_dev_dir_unavailable_fail_closed(tmp_path: Path) -> None:
 async def test_run_boot_static_webui_end_to_end(
     gen_distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """B2c：代目标 run_boot → webui 静态 serve 基座 dist + WS 注入；stop 后端口释放。"""
+    """代目标 run_boot → webui 静态 serve 基座 dist + WS 注入；stop 后端口释放。"""
     import http.client
 
     from ghrah_bootloader.lifecycle import port_in_use
 
     root, layout = gen_distro_with_mock_os
-    _server_entry(layout.venv).unlink()  # OS 必须来自代内 env
     dist = root / "generic" / "versions" / "2026.09" / "observer-web" / "dist"
     (dist / "assets").mkdir(parents=True)
     (dist / "index.html").write_text(

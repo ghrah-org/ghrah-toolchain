@@ -2,7 +2,7 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""packages 安装模式测试（B2/B3：产物树物化 / 组合代物化 / 复用 / 门禁在代 / 回滚）。
+"""packages 安装模式测试（产物树物化 / 组合代物化 / 复用 / 门禁在代 / 回滚）。
 
 不跑真实构建与装配：monkeypatch ``build_artifacts``/``materialize_generation``
 为假实现，物化最小骨架（BOOTSTRAP/manifest + GENERATION/.deps-fingerprint/
@@ -149,9 +149,6 @@ def _write_packages_distro(home: Path, repo: Path) -> None:
     distro_root.mkdir(parents=True, exist_ok=True)
     (distro_root / "distro.toml").write_text(
         f"""
-[distro]
-install_mode = "packages"
-
 [distro.repo]
 path = "{repo}"
 """,
@@ -191,12 +188,12 @@ def test_p1_packages_install_full_chain(
 
     entry = mgr.ensure(distro="generic", gate="basic")
 
-    assert entry.version == "2026.09"  # 无插件 gen_id = 基座版本名（D11）
+    assert entry.version == "2026.09"  # 无插件 gen_id = 基座版本名
     assert entry.commit == head
     assert entry.kind == "generation"
-    # build_artifacts 以 out_dir=versions/<ver> 被调（物化即构建，B2 D1）
+    # build_artifacts 以 out_dir=versions/<ver> 被调（物化即构建）
     assert fake_build.calls["build"] == [(head, home / "generic" / "versions" / "2026.09")]
-    # 代物化以基座树为输入（B3 四段）
+    # 代物化以基座树为输入（四段）
     assert fake_build.calls["materialize"] == [
         (home / "generic" / "versions" / "2026.09", "2026.09", False)
     ]
@@ -286,7 +283,7 @@ def test_p4_gate_failure_cleans_tree_and_generation(
     fake_build.fail["gate"] = GateError("代冒烟模拟失败")
     monkeypatch.setattr(RuntimeRefManager, "_gate_generation", raising_gate)
 
-    # 首装路径：gate 失败 → GateError 冒泡 + 新建代与新建基座同删（D10）
+    # 首装路径：gate 失败 → GateError 冒泡 + 新建代与新建基座同删
     with pytest.raises(GateError):
         mgr.ensure(distro="generic", gate="basic")
 
@@ -311,7 +308,7 @@ def test_p5_uv_pnpm_only_via_materialize(home: Path, repo: Path, fake_build, mon
     # 物化被 fake 层拦截（不落 _run）；绕过物化层的裸 uv/pnpm 调用不存在
     assert uv_pnpm == []
     assert len(fake_build.calls["materialize"]) == 1
-    # 发行版级 env/ 不物化（per-gen env 属代内；worktree 语义 B4 前不动）
+    # 发行版级 env/ 不物化（per-gen env 属代内；worktree 语义不动）
     assert not (home / "generic" / "env").exists()
 
 
@@ -319,7 +316,7 @@ def test_p5_uv_pnpm_only_via_materialize(home: Path, repo: Path, fake_build, mon
 
 
 def test_p6_mixed_domain_fails_closed(home: Path, repo: Path, fake_build) -> None:
-    """混域 fail-closed：旧 worktree 残树不构成 packages 复用依据（B2 D6）。
+    """混域 fail-closed：旧 worktree 残树不构成 packages 复用依据。
 
     基础名被异形残树占用 → 追加 ``-<short7>`` 建新产物树（不复用不覆盖）；
     连短 sha 名也被异形残树占用（不同 commit 无法判定）→ 报「版本名冲突」。
@@ -368,7 +365,7 @@ def test_p7_rollback_repoints_old_generation(
     layout = DistroLayout(root=home / "generic")
     # 重指回旧代（current → generations/<旧gen>）
     assert layout.current.resolve() == _gen_entry_dir(home, first.version).resolve()
-    assert uv_pnpm == []  # 回滚 = 代复核（指纹一致零操作，D6）
+    assert uv_pnpm == []  # 回滚 = 代复核（指纹一致零操作）
     assert first.version in layout.list_versions()  # 旧基座树保留
     assert len(layout.list_versions()) == 1  # 新建基座树已清理
     assert layout.list_generations() == [first.version]  # 新建代已清理
@@ -400,12 +397,10 @@ def test_p8_enumeration_shows_generation_and_mode(
 
     assert main(["doctor"]) == 0
     out = capsys.readouterr().out
-    assert "install_mode=packages" in out
     assert "generations=['2026.09']" in out
     assert head[:7] in out
     assert main(["runtime", "status", "--distro", "generic"]) == 0
     status_out = capsys.readouterr().out
-    assert "install_mode = packages" in status_out
     assert "generations = " in status_out
     assert "base=2026.09" in status_out
     assert main(["distro", "list"]) == 0
@@ -427,7 +422,7 @@ def test_p9_generation_failure_cleans_new_base(home: Path, repo: Path, fake_buil
         mgr.ensure(distro="generic", gate="basic")
 
     layout = DistroLayout(root=home / "generic")
-    assert layout.list_versions() == []  # 新建基座树同删（D10）
+    assert layout.list_versions() == []  # 新建基座树同删
     assert layout.list_generations() == []
     assert not layout.current.exists()
 
