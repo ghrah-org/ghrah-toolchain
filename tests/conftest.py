@@ -69,7 +69,7 @@ def _no_default_port_collision(monkeypatch: pytest.MonkeyPatch) -> None:
     与 ``test_runtime_ref`` / ``test_install_packages`` 既有的 autouse 隔离同源，
     此处收敛为全局兜底，防未来新增用例再次踩坑。
     """
-    from ghrah_bootloader import adopt, boot, lifecycle, runtime_ref
+    from ghrah_toolchain import adopt, boot, lifecycle, runtime_ref
 
     real = lifecycle.port_in_use
 

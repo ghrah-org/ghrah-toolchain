@@ -32,7 +32,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ghrah_bootloader.lifecycle import (
+from ghrah_toolchain.lifecycle import (
     _WEBUI_ENV_FILE,
     _WEBUI_ENV_KEY,
     BootStack,
@@ -216,7 +216,7 @@ def test_cleanup_env_file_missing_is_noop(tmp_path: Path) -> None:
 
 def test_ensure_pnpm_missing_raises() -> None:
     stack = BootStack(StackConfig(open_browser=False))
-    with patch("ghrah_bootloader.lifecycle.shutil.which", return_value=None):
+    with patch("ghrah_toolchain.lifecycle.shutil.which", return_value=None):
         with pytest.raises(RuntimeError, match="pnpm"):
             stack._ensure_pnpm()
 
@@ -226,7 +226,7 @@ def test_webui_start_missing_dir_raises(tmp_path: Path, free_port_factory) -> No
         StackConfig(open_browser=False, webui_port=free_port_factory()),
         webui_dir=tmp_path / "nope",
     )
-    with patch("ghrah_bootloader.lifecycle.shutil.which", return_value="/usr/bin/pnpm"):
+    with patch("ghrah_toolchain.lifecycle.shutil.which", return_value="/usr/bin/pnpm"):
         with pytest.raises(RuntimeError, match="observer-web package not found"):
             stack._start_webui()
 
@@ -266,15 +266,15 @@ async def test_stop_without_webui_skips_port_recheck() -> None:
 
 async def test_wait_webui_port_released_warns_when_still_busy(caplog) -> None:
     stack = BootStack(StackConfig(open_browser=False))
-    with patch("ghrah_bootloader.lifecycle.port_in_use", return_value=True):
-        with caplog.at_level(logging.WARNING, logger="ghrah_bootloader.lifecycle"):
+    with patch("ghrah_toolchain.lifecycle.port_in_use", return_value=True):
+        with caplog.at_level(logging.WARNING, logger="ghrah_toolchain.lifecycle"):
             await stack._wait_webui_port_released(timeout=0.3)
     assert any("still in use" in r.message for r in caplog.records)
 
 
 async def test_wait_webui_port_released_quick_when_free() -> None:
     stack = BootStack(StackConfig(open_browser=False))
-    with patch("ghrah_bootloader.lifecycle.port_in_use", return_value=False):
+    with patch("ghrah_toolchain.lifecycle.port_in_use", return_value=False):
         await asyncio.wait_for(stack._wait_webui_port_released(timeout=5.0), timeout=1.0)
 
 
@@ -375,7 +375,7 @@ async def test_start_os_port_in_use_raises() -> None:
 
 
 async def test_wait_for_server_success() -> None:
-    from ghrah_bootloader.health import wait_for_server
+    from ghrah_toolchain.health import wait_for_server
 
     server = _start_health_server(0)
     port = server.server_address[1]
@@ -388,7 +388,7 @@ async def test_wait_for_server_success() -> None:
 
 
 async def test_wait_for_server_timeout() -> None:
-    from ghrah_bootloader.health import wait_for_server
+    from ghrah_toolchain.health import wait_for_server
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -402,7 +402,7 @@ async def test_wait_for_server_timeout() -> None:
 
 def test_start_webui_nt_uses_cmd_c_pnpm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """nt：命令为 cmd /c pnpm dev …，creationflags 含 CREATE_NEW_PROCESS_GROUP。"""
-    from ghrah_bootloader import lifecycle as lc
+    from ghrah_toolchain import lifecycle as lc
 
     class _OsProxy:
         def __init__(self) -> None:
@@ -433,7 +433,7 @@ def test_start_webui_nt_uses_cmd_c_pnpm(tmp_path: Path, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(lc, "os", _OsProxy(), raising=False)
     # pnpm_command() 读 materialize 模块内的 os.name——同需代理
-    from ghrah_bootloader import materialize as mat
+    from ghrah_toolchain import materialize as mat
 
     monkeypatch.setattr(mat, "os", _OsProxy(), raising=False)
     # CREATE_NEW_PROCESS_GROUP 是 Windows-only subprocess 属性（真实 nt 恒在；
@@ -453,7 +453,7 @@ def test_start_webui_nt_uses_cmd_c_pnpm(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_start_webui_posix_uses_bare_pnpm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """posix：命令为裸 pnpm dev …，start_new_session=True。"""
-    from ghrah_bootloader import lifecycle as lc
+    from ghrah_toolchain import lifecycle as lc
 
     webui = tmp_path / "observer-web"
     webui.mkdir()
@@ -586,7 +586,7 @@ async def test_static_webui_port_in_use_raises(tmp_path: Path) -> None:
 
 def test_static_handler_ws_url_default_from_config(tmp_path: Path) -> None:
     """静态面 ws_url 缺省取 StackConfig.subject_ws_url（OS 端口覆盖随行）。"""
-    from ghrah_bootloader.lifecycle import _inject_ws_url, _make_static_handler
+    from ghrah_toolchain.lifecycle import _inject_ws_url, _make_static_handler
 
     handler = _make_static_handler(tmp_path, "ws://127.0.0.1:4222/ws")
     assert handler is not None

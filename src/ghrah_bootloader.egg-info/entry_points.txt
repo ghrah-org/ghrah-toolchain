@@ -1,2 +1,0 @@
-[console_scripts]
-ghrah-bootloader = ghrah_bootloader.cli:main

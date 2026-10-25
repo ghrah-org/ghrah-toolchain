@@ -7,25 +7,28 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ghrah-bootloader"
-version = "0.1.0"
-description = "ghrah AgentOS 安装/配置工具与引导器"
+name = "ghrah-toolchain"
+version = "0.2.0"
+description = "ghrah 开发、分发、配置与实例管理工具链"
 readme = "README.md"
-requires-python = ">=3.11"
-# boot 路径硬约束：仅 stdlib，禁止任何运行时第三方依赖与 ghrah-* 依赖
-dependencies = []
+requires-python = ">=3.15.1"
+# 工具链允许显式声明第三方依赖，但保持与 ghrah 运行时业务包解耦。
+dependencies = ["jsonschema>=4.26", "packaging>=26.3", "psutil>=7.2"]
 
 [project.scripts]
-ghrah-bootloader = "ghrah_bootloader.cli:main"
+ghrah = "ghrah_toolchain.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+ghrah_toolchain = ["schemas/*.json"]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
-    "ruff>=0.8",
+    "ruff>=0.16.8",
 ]
 
 [tool.pytest.ini_options]
@@ -38,7 +41,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py315"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]

@@ -34,9 +34,9 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ghrah_bootloader import __version__
-from ghrah_bootloader.errors import BuildError
-from ghrah_bootloader.materialize import pnpm_command
+from ghrah_toolchain import __version__
+from ghrah_toolchain.errors import BuildError
+from ghrah_toolchain.materialize import pnpm_command
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ def read_source_commit(tree: Path) -> str | None:
         return None
     try:
         data = tomllib.loads(bootstrap.read_text(encoding="utf-8"))
-    except (tomllib.TOMLDecodeError, OSError):
+    except tomllib.TOMLDecodeError, OSError:
         return None
     commit = data.get("bootstrap", {}).get("source_commit")
     return str(commit) if commit else None
@@ -301,7 +301,7 @@ def _write_bootstrap(staging: Path, sha: str) -> None:
         "[bootstrap]\n"
         f'source_commit = "{sha}"\n'
         f'built_at = "{built_at}"\n'
-        f'builder = "ghrah-bootloader {__version__}"\n'
+        f'builder = "ghrah-toolchain {__version__}"\n'
     )
     (staging / "BOOTSTRAP.toml").write_text(text, encoding="utf-8")
 

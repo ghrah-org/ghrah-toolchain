@@ -19,7 +19,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ghrah_bootloader.errors import LayoutError
+from ghrah_toolchain.errors import LayoutError
 
 # 已退役的安装模式键值：worktree 形态（git worktree 版本树 + 发行级 env + 自管
 # .pth）存量声明若仍写该值，load 显式报错而非静默容忍。
@@ -70,7 +70,7 @@ class BootToml:
         base = root or ghrah_root()
         base.mkdir(parents=True, exist_ok=True)
         lines = [
-            "# ghrah-bootloader 引导菜单（GPT）；由 ghrah-bootloader 维护",
+            "# ghrah-toolchain 引导菜单（GPT）；由 ghrah-toolchain 维护",
         ]
         for key in ("default", "fallback", "last_good"):
             value = getattr(self, key)
@@ -260,7 +260,7 @@ def render_distro_toml(
 ) -> str:
     """首次 install 的 distro.toml 模板（手写序列化；``DistroToml.load`` 可读回）。"""
     lines = [
-        "# ghrah-bootloader 发行版声明（首次 install 生成）",
+        "# ghrah-toolchain 发行版声明（首次 install 生成）",
         "",
         "[distro]",
         f"name = {_toml_str(name)}",

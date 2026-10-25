@@ -31,9 +31,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ghrah_bootloader.errors import AdoptError
-from ghrah_bootloader.layout import DistroLayout, DistroToml, resolve_data_root
-from ghrah_bootloader.lifecycle import port_in_use
+from ghrah_toolchain.errors import AdoptError
+from ghrah_toolchain.layout import DistroLayout, DistroToml, resolve_data_root
+from ghrah_toolchain.lifecycle import port_in_use
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ def _guard(layout: DistroLayout, distro_toml: DistroToml, markers: list[str], *,
     """认领守卫：端口占用 / 数据盘同名冲突 / 文件句柄在用。"""
     if port_in_use(_DEFAULT_HOST, port):
         raise AdoptError(
-            f"端口 {port} 被占用：认领要求 OS 已停止（先 ghrah-bootloader stop / Ctrl-C）"
+            f"端口 {port} 被占用：认领要求 OS 已停止（先 ghrah-toolchain stop / Ctrl-C）"
         )
     data_root = resolve_data_root(layout, distro_toml)
     conflicts = [

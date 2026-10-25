@@ -14,13 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from ghrah_bootloader.boot import (
+from ghrah_toolchain.boot import (
     _clear_boot_pid,
     _write_boot_pid,
     boot_pid_path,
     stop_boot_session,
 )
-from ghrah_bootloader.errors import BootloaderError
+from ghrah_toolchain.errors import ToolchainError
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
 
@@ -52,7 +52,7 @@ def test_pidfile_write_and_clear(home: Path) -> None:
 def test_pidfile_rejects_double_boot(home: Path) -> None:
     root = _distro_root(home)
     _write_boot_pid(root)  # 本进程即"活 pid"
-    with pytest.raises(BootloaderError, match="已有 boot 会话"):
+    with pytest.raises(ToolchainError, match="已有 boot 会话"):
         _write_boot_pid(root)
     _clear_boot_pid(root)
 
@@ -89,8 +89,8 @@ while not stopped["v"]:
 """
 
 
-def _spawn_fake_boot(home: Path, name: str = "ghrah-bootloader") -> subprocess.Popen:
-    """spawn 一个 argv[0] 伪装为 ghrah-bootloader 的子进程（装 SIGTERM handler）。
+def _spawn_fake_boot(home: Path, name: str = "ghrah-toolchain") -> subprocess.Popen:
+    """spawn 一个 argv[0] 伪装为 ghrah-toolchain 的子进程（装 SIGTERM handler）。
 
     经 home 下的符号链接 <name> → sys.executable 实现（execv 需要绝对路径，
     且 argv[0] 由调用方指定）。
@@ -163,7 +163,7 @@ def test_stop_without_proc_skips_guard(
     capsys: pytest.CaptureFixture,
 ) -> None:
     """macOS 回归位：/proc 不存在时护栏跳过、stop 不崩溃、继续 SIGTERM。"""
-    from ghrah_bootloader import boot as boot_mod
+    from ghrah_toolchain import boot as boot_mod
 
     monkeypatch.setattr(boot_mod.Path, "is_dir", lambda self: False)
     proc = _spawn_fake_boot(home)
@@ -194,7 +194,7 @@ def test_stop_timeout_reports_stuck(home: Path) -> None:
         "time.sleep(60)\n"
     )
     if os.name == "posix":
-        exe = home / "ghrah-bootloader"
+        exe = home / "ghrah-toolchain"
         exe.symlink_to(sys.executable)
         argv = [str(exe), "-c", code]
     else:
@@ -243,8 +243,8 @@ class _StopNtSim:
     """nt 停止链路模拟：os 代理（name=nt）+ mock winproc/_taskkill/_session_exited。"""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, *, image: str | None) -> None:
-        from ghrah_bootloader import boot as boot_mod
-        from ghrah_bootloader import winproc as winproc_mod
+        from ghrah_toolchain import boot as boot_mod
+        from ghrah_toolchain import winproc as winproc_mod
 
         self.boot_mod = boot_mod
         self.taskkill_calls: list[list[str]] = []
@@ -286,7 +286,7 @@ def test_stop_nt_escalation_chain(home: Path, monkeypatch: pytest.MonkeyPatch) -
     boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
     sim = _StopNtSim(monkeypatch, image=r"C:\venv\Scripts\python.exe")
     # 预检 + 优雅段轮询恒「活」（exited_or_escalated：强杀后恒「死」）
-    monkeypatch.setattr("ghrah_bootloader.boot._busy_ports", lambda *a, **kw: [])
+    monkeypatch.setattr("ghrah_toolchain.boot._busy_ports", lambda *a, **kw: [])
     rc = stop_boot_session("generic", timeout=0.3)
     assert rc == 0
     assert sim.taskkill_calls[0] == ["taskkill", "/PID", str(pid)]  # 优雅在前
@@ -299,9 +299,9 @@ def test_stop_nt_graceful_exit_skips_force(home: Path, monkeypatch: pytest.Monke
     root = _distro_root(home)
     pid = 4242
     boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
-    sim = _StopNtSim(monkeypatch, image=r"C:\venv\Scripts\ghrah-bootloader.exe")
+    sim = _StopNtSim(monkeypatch, image=r"C:\venv\Scripts\ghrah-toolchain.exe")
     sim.graceful_exit = True  # 优雅 taskkill 后即退出
-    monkeypatch.setattr("ghrah_bootloader.boot._busy_ports", lambda *a, **kw: [])
+    monkeypatch.setattr("ghrah_toolchain.boot._busy_ports", lambda *a, **kw: [])
     rc = stop_boot_session("generic", timeout=5.0)
     assert rc == 0
     assert sim.taskkill_calls == [["taskkill", "/PID", str(pid)]]
@@ -336,14 +336,14 @@ def test_stop_nt_guard_rejects_foreign_image(home: Path, monkeypatch: pytest.Mon
 def test_stop_nt_guard_allows_python_and_bootloader(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """护栏放行：python.exe 与 ghrah-bootloader.exe 两种映像名。"""
-    for image in (r"C:\py\python.exe", r"C:\venv\Scripts\ghrah-bootloader.exe"):
+    """护栏放行：python.exe 与 ghrah-toolchain.exe 两种映像名。"""
+    for image in (r"C:\py\python.exe", r"C:\venv\Scripts\ghrah-toolchain.exe"):
         root = _distro_root(home)
         pid = 4242
         boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
         sim = _StopNtSim(monkeypatch, image=image)
         sim.graceful_exit = True
-        monkeypatch.setattr("ghrah_bootloader.boot._busy_ports", lambda *a, **kw: [])
+        monkeypatch.setattr("ghrah_toolchain.boot._busy_ports", lambda *a, **kw: [])
         rc = stop_boot_session("generic", timeout=1.0)
         assert rc == 0, image
         assert sim.taskkill_calls, image
@@ -358,7 +358,7 @@ def test_stop_nt_guard_unavailable_degrades(
     boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
     sim = _StopNtSim(monkeypatch, image=None)
     sim.graceful_exit = True  # 护栏降级后优雅退出
-    monkeypatch.setattr("ghrah_bootloader.boot._busy_ports", lambda *a, **kw: [])
+    monkeypatch.setattr("ghrah_toolchain.boot._busy_ports", lambda *a, **kw: [])
     rc = stop_boot_session("generic", timeout=1.0)
     assert rc == 0
     out = capsys.readouterr().out
@@ -375,7 +375,7 @@ def test_stop_nt_busy_ports_hint_windows(
     boot_pid_path(root).write_text(f"{pid}\n", encoding="utf-8")
     sim = _StopNtSim(monkeypatch, image=r"C:\venv\Scripts\python.exe")
     sim.graceful_exit = True
-    monkeypatch.setattr("ghrah_bootloader.boot._busy_ports", lambda *a, **kw: [4112])
+    monkeypatch.setattr("ghrah_toolchain.boot._busy_ports", lambda *a, **kw: [4112])
     rc = stop_boot_session("generic", timeout=1.0)
     assert rc == 2
     assert "netstat" in capsys.readouterr().out
@@ -385,18 +385,18 @@ def test_write_boot_pid_fails_closed_on_unknown(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """探测不可用（None）→ fail-closed 拒绝 + 人工处置文案。"""
-    from ghrah_bootloader import boot as boot_mod
+    from ghrah_toolchain import boot as boot_mod
 
     root = _distro_root(home)
     boot_pid_path(root).write_text("4242\n", encoding="utf-8")
     monkeypatch.setattr(boot_mod, "_pid_alive", lambda pid: None)
-    with pytest.raises(BootloaderError, match="人工确认"):
+    with pytest.raises(ToolchainError, match="人工确认"):
         _write_boot_pid(root)
 
 
 def test_write_boot_pid_recycles_on_dead_nt(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Windows 下 pid 死 → 陈旧 pidfile 正常回收（恒真桩缺陷消解）。"""
-    from ghrah_bootloader import boot as boot_mod
+    from ghrah_toolchain import boot as boot_mod
 
     root = _distro_root(home)
     boot_pid_path(root).write_text("4242\n", encoding="utf-8")

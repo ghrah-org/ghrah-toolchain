@@ -31,8 +31,8 @@ from dataclasses import dataclass
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from ghrah_bootloader.health import wait_for_server
-from ghrah_bootloader.materialize import pnpm_command
+from ghrah_toolchain.health import wait_for_server
+from ghrah_toolchain.materialize import pnpm_command
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +156,7 @@ def terminate_process(proc: subprocess.Popen[bytes]) -> None:
     group_owned = False
     try:
         group_owned = os.getpgid(pgid) == pgid
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError, PermissionError:
         logger.debug("process group check failed; falling back to terminate()", exc_info=True)
     if not group_owned:
         proc.terminate()
@@ -167,7 +167,7 @@ def terminate_process(proc: subprocess.Popen[bytes]) -> None:
         return
     try:
         os.killpg(pgid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError, PermissionError:
         logger.debug("process group already gone", exc_info=True)
     try:
         proc.wait(timeout=5)
@@ -175,7 +175,7 @@ def terminate_process(proc: subprocess.Popen[bytes]) -> None:
         logger.warning("process group did not exit after SIGTERM, escalating to SIGKILL")
         try:
             os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError, PermissionError:
             logger.debug("process group SIGKILL failed", exc_info=True)
         try:
             proc.wait(timeout=5)
@@ -253,6 +253,11 @@ class BootStack:
     def os_process(self) -> subprocess.Popen[bytes] | None:
         return self._os_process
 
+    @property
+    def webui_process(self) -> subprocess.Popen[bytes] | None:
+        """返回显式开发前端子进程，静态服务没有独立进程。"""
+        return self._webui_process
+
     def subject_ws_url(self) -> str:
         return self._config.subject_ws_url()
 
@@ -303,8 +308,8 @@ class BootStack:
             self._os_command,
             cwd=str(self._os_cwd) if self._os_cwd is not None else None,
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=None,
+            stderr=None,
             start_new_session=True,
         )
         logger.info(
@@ -425,8 +430,8 @@ class BootStack:
             command,
             cwd=str(webui_dir),
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=None,
+            stderr=None,
             **popen_kwargs,
         )
         logger.info(

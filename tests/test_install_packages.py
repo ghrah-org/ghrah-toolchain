@@ -18,14 +18,14 @@ from pathlib import Path
 
 import pytest
 
-from ghrah_bootloader.errors import GateError, RuntimeRefError
-from ghrah_bootloader.layout import BootToml, DistroLayout
-from ghrah_bootloader.runtime_ref import RuntimeRefManager
+from ghrah_toolchain.errors import GateError, RuntimeRefError
+from ghrah_toolchain.layout import BootToml, DistroLayout
+from ghrah_toolchain.runtime_ref import RuntimeRefManager
 
 
 @pytest.fixture(autouse=True)
 def _no_running_os(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("ghrah_bootloader.runtime_ref.port_in_use", lambda host, port: False)
+    monkeypatch.setattr("ghrah_toolchain.runtime_ref.port_in_use", lambda host, port: False)
 
 
 def _git(repo: Path, *args: str, env: dict | None = None) -> str:
@@ -87,7 +87,7 @@ def _materialize_fake_artifacts(tree: Path, commit: str) -> None:
 
 def _materialize_fake_generation(gen_dir: Path, spec) -> None:
     """物化最小代骨架（GENERATION + 指纹 + env 完整性探针所需文件）。"""
-    from ghrah_bootloader.materialize import (
+    from ghrah_toolchain.materialize import (
         FINGERPRINT_NAME,
         GENERATION_TOML,
         generation_fingerprint,
@@ -132,7 +132,7 @@ def fake_build(monkeypatch: pytest.MonkeyPatch, repo: Path):
     def _gate_generation(self_or_dir, gen_dir=None):
         calls.setdefault("gate", []).append(Path(gen_dir if gen_dir is not None else self_or_dir))
 
-    import ghrah_bootloader.runtime_ref as rr
+    import ghrah_toolchain.runtime_ref as rr
 
     monkeypatch.setattr(rr, "materialize_generation", _materialize)
     monkeypatch.setattr(rr, "build_artifacts", _build)
@@ -240,7 +240,7 @@ def test_p2_same_commit_reuses_without_rebuild(home: Path, repo: Path, fake_buil
 
 
 def test_p3_build_failure_leaves_state_untouched(home: Path, repo: Path, fake_build) -> None:
-    from ghrah_bootloader.errors import BuildError
+    from ghrah_toolchain.errors import BuildError
 
     _write_packages_distro(home, repo)
     fake_build.fail["build"] = BuildError("模拟构建失败")
@@ -393,7 +393,7 @@ def test_p8_enumeration_shows_generation_and_mode(
     assert mgr.resolve("generic").label == entry.label
     assert mgr.resolve("generic").kind == "generation"
 
-    from ghrah_bootloader.cli import main
+    from ghrah_toolchain.cli import main
 
     assert main(["doctor"]) == 0
     out = capsys.readouterr().out
@@ -412,7 +412,7 @@ def test_p8_enumeration_shows_generation_and_mode(
 
 
 def test_p9_generation_failure_cleans_new_base(home: Path, repo: Path, fake_build) -> None:
-    from ghrah_bootloader.errors import MaterializeError
+    from ghrah_toolchain.errors import MaterializeError
 
     _write_packages_distro(home, repo)
     fake_build.fail["materialize"] = MaterializeError("代物化模拟失败")
@@ -429,7 +429,7 @@ def test_p9_generation_failure_cleans_new_base(home: Path, repo: Path, fake_buil
 
 def test_p9b_generation_failure_keeps_reused_base(home: Path, repo: Path, fake_build) -> None:
     """基座已复用时失败：基座保留（既有产物库不可变），仅本次无代。"""
-    from ghrah_bootloader.errors import MaterializeError
+    from ghrah_toolchain.errors import MaterializeError
 
     _write_packages_distro(home, repo)
     mgr = _mgr(home, repo)
@@ -454,7 +454,7 @@ def test_p10_switch_failure_rolls_back_to_old_generation(
     second_commit = _commit(repo, "b", "2026-09-20T10:00:00 +0000")
 
     real_repoint = __import__(
-        "ghrah_bootloader.runtime_ref", fromlist=["repoint_current"]
+        "ghrah_toolchain.runtime_ref", fromlist=["repoint_current"]
     ).repoint_current
     state = {"failed": False}
 
@@ -464,7 +464,7 @@ def test_p10_switch_failure_rolls_back_to_old_generation(
             pass
         return real_repoint(distro_root, ver, segment=segment)
 
-    monkeypatch.setattr("ghrah_bootloader.runtime_ref.repoint_current", failing_repoint_after_first)
+    monkeypatch.setattr("ghrah_toolchain.runtime_ref.repoint_current", failing_repoint_after_first)
 
     def failing_write_boot(boot_before, old, new):
         raise RuntimeError("boot.toml 写入模拟失败")

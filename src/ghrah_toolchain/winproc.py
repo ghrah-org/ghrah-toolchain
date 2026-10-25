@@ -4,14 +4,14 @@
 
 """Windows 进程探测与目录链接原语（nt 分派目标的唯一落位）。
 
-仅在 ``os.name == "nt"`` 时被 :mod:`ghrah_bootloader.runtime_ref` /
-:mod:`ghrah_bootloader.boot` 分派进入；本模块可在任意平台安全 import
+仅在 ``os.name == "nt"`` 时被 :mod:`ghrah_toolchain.runtime_ref` /
+:mod:`ghrah_toolchain.boot` 分派进入；本模块可在任意平台安全 import
 （``ctypes`` 标准库恒在；``_winapi`` 仅 Windows 存在，try-import 守卫）。
 
 - :func:`pid_alive` —— OpenProcess + GetExitCodeProcess 三值探测
   （``None`` = 探测不可用；fail-closed 语义由调用方决定）；
 - :func:`process_image` —— OpenProcess + QueryFullProcessImageNameW 取进程
-  映像全路径（stop 护栏：pid 是否仍属于 ghrah-bootloader 家族）；
+  映像全路径（stop 护栏：pid 是否仍属于 ghrah-toolchain 家族）；
 - :func:`repoint_dir_link` / :func:`create_junction` —— 目录链接三级回退
   重指（symlink+replace → 删旧建新 symlink → junction）。
 
@@ -26,7 +26,7 @@ import ctypes
 import os
 from pathlib import Path
 
-from ghrah_bootloader.errors import WinProcError
+from ghrah_toolchain.errors import WinProcError
 
 __all__ = ["create_junction", "pid_alive", "process_image", "repoint_dir_link"]
 
@@ -74,7 +74,7 @@ def _configure(func, restype, argtypes) -> None:
     try:
         func.restype = restype
         func.argtypes = argtypes
-    except (AttributeError, TypeError):  # 测试替身：纯 Python 方法
+    except AttributeError, TypeError:  # 测试替身：纯 Python 方法
         pass
 
 

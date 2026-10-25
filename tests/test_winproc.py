@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from ghrah_bootloader import winproc
-from ghrah_bootloader.errors import WinProcError
+from ghrah_toolchain import winproc
+from ghrah_toolchain.errors import WinProcError
 
 # ── fake kernel32 夹具 ────────────────────────────────────────
 
@@ -132,8 +132,8 @@ def test_pid_alive_opens_with_limited_access(fake_kernel32) -> None:
 
 
 def test_process_image_ok(fake_kernel32) -> None:
-    fake_kernel32.image_result = r"C:\Users\me\Scripts\ghrah-bootloader.exe"
-    assert winproc.process_image(4242) == r"C:\Users\me\Scripts\ghrah-bootloader.exe"
+    fake_kernel32.image_result = r"C:\Users\me\Scripts\ghrah-toolchain.exe"
+    assert winproc.process_image(4242) == r"C:\Users\me\Scripts\ghrah-toolchain.exe"
 
 
 def test_process_image_open_fail_is_none(fake_kernel32) -> None:

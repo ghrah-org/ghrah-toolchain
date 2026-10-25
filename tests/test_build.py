@@ -24,10 +24,10 @@ from pathlib import Path
 
 import pytest
 
-import ghrah_bootloader.build as bld
-from ghrah_bootloader.build import build_artifacts, normalize_commit, verify_artifacts
-from ghrah_bootloader.cli import main
-from ghrah_bootloader.errors import BuildError
+import ghrah_toolchain.build as bld
+from ghrah_toolchain.build import build_artifacts, normalize_commit, verify_artifacts
+from ghrah_toolchain.cli import main
+from ghrah_toolchain.errors import BuildError
 
 # ── fixtures 小仓 ────────────────────────────────────────────
 
@@ -255,7 +255,7 @@ class TestBuildArtifacts:
         assert f'source_commit = "{result.source_commit}"' in text
         m = re.search(r'built_at = "([^"]+)"', text)
         assert m and ("+00:00" in m.group(1) or m.group(1).endswith("Z"))
-        assert re.search(r'builder = "ghrah-bootloader [\d.]+"', text)
+        assert re.search(r'builder = "ghrah-toolchain [\d.]+"', text)
 
     def test_u8_webui_pack_and_copy(self, fake_repo: Path, tmp_path: Path) -> None:
         _require("pnpm")
@@ -280,10 +280,10 @@ class TestBuildArtifacts:
         rc = main(["build", "--repo", str(fake_repo), "--ref", "latest"])
         assert rc == 0
         sha = normalize_commit(fake_repo, "HEAD")
-        expected = fake_repo / "dist" / "bootloader" / sha[:7]
+        expected = fake_repo / "dist" / "toolchain" / sha[:7]
         assert (expected / "manifest.json").is_file()
         assert "产物验证通过" in capsys.readouterr().out
-        # 非法 ref → BootloaderError → rc=1、无产物
+        # 非法 ref → ToolchainError → rc=1、无产物
         rc2 = main(
             [
                 "build",
@@ -387,8 +387,8 @@ class TestW4PnpmCommandForm:
         """nt：_build_webui 的 pnpm 族命令全部经 cmd /c pnpm 前缀。"""
         import subprocess as real_subprocess
 
-        import ghrah_bootloader.build as bld
-        from ghrah_bootloader import materialize as mat
+        import ghrah_toolchain.build as bld
+        from ghrah_toolchain import materialize as mat
 
         class _OsProxy:
             def __init__(self) -> None:
@@ -439,7 +439,7 @@ class TestW4PnpmCommandForm:
     def test_pnpm_command_posix_bare(self) -> None:
         import os as real_os
 
-        from ghrah_bootloader.materialize import pnpm_command
+        from ghrah_toolchain.materialize import pnpm_command
 
         if real_os.name == "nt":  # 真机 Windows 不强断言（CI 面 posix）
             import pytest

@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from ghrah_bootloader.errors import SnapshotError
-from ghrah_bootloader.layout import DistroLayout, DistroToml, snapshots_dir
-from ghrah_bootloader.runtime_ref import BootEntry
-from ghrah_bootloader.snapshot import list_snapshots, restore, roll, take
+from ghrah_toolchain.errors import SnapshotError
+from ghrah_toolchain.layout import DistroLayout, DistroToml, snapshots_dir
+from ghrah_toolchain.runtime_ref import BootEntry
+from ghrah_toolchain.snapshot import list_snapshots, restore, roll, take
 
 
 @pytest.fixture

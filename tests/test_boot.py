@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from ghrah_bootloader.boot import (
+from ghrah_toolchain.boot import (
     build_data_plane_env,
     ensure_data_dirs,
     os_server_command,
@@ -29,7 +29,7 @@ from ghrah_bootloader.boot import (
     resolve_data_root,
     run_boot,
 )
-from ghrah_bootloader.layout import BootToml, DistroLayout, DistroToml
+from ghrah_toolchain.layout import BootToml, DistroLayout, DistroToml
 
 
 def _make_gen(
@@ -133,47 +133,47 @@ def test_resolve_boot_target_uses_boot_toml_default(tmp_path: Path) -> None:
 
 
 def test_resolve_boot_target_requires_distro(tmp_path: Path) -> None:
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
-    with pytest.raises(BootloaderError, match="未指定发行版"):
+    with pytest.raises(ToolchainError, match="未指定发行版"):
         resolve_boot_target(None, None, root=tmp_path)
 
 
 def test_resolve_boot_target_unknown_distro(tmp_path: Path) -> None:
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
     _make_distro(tmp_path)
-    with pytest.raises(BootloaderError, match="未安装"):
+    with pytest.raises(ToolchainError, match="未安装"):
         resolve_boot_target("nope", None, root=tmp_path)
 
 
 def test_resolve_boot_target_version_mismatch_rejected(tmp_path: Path) -> None:
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
     _make_distro(tmp_path)
-    with pytest.raises(BootloaderError, match="不一致"):
+    with pytest.raises(ToolchainError, match="不一致"):
         resolve_boot_target("generic", "2026.10", root=tmp_path)
 
 
 def test_resolve_boot_target_current_escape_rejected(tmp_path: Path) -> None:
     """current 指向受管段（generations/）之外的路径时拒绝引导。"""
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
     _make_distro(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
     (tmp_path / "generic" / "current").unlink()
     (tmp_path / "generic" / "current").symlink_to(outside)
-    with pytest.raises(BootloaderError, match="generations/ 之外"):
+    with pytest.raises(ToolchainError, match="generations/ 之外"):
         resolve_boot_target("generic", None, root=tmp_path)
 
 
 def test_resolve_boot_target_missing_current(tmp_path: Path) -> None:
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
     _make_distro(tmp_path)
     (tmp_path / "generic" / "current").unlink()
-    with pytest.raises(BootloaderError, match="current"):
+    with pytest.raises(ToolchainError, match="current"):
         resolve_boot_target("generic", None, root=tmp_path)
 
 
@@ -181,10 +181,10 @@ def test_resolve_boot_target_missing_current(tmp_path: Path) -> None:
 
 
 def test_os_server_command_missing_binary(tmp_path: Path) -> None:
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
     layout = DistroLayout(root=tmp_path)
-    with pytest.raises(BootloaderError, match="入口缺失"):
+    with pytest.raises(ToolchainError, match="入口缺失"):
         os_server_command(layout.root / "env" / ".venv")
 
 
@@ -380,7 +380,7 @@ def _make_fake_snapshot(root: Path) -> Path:
 
 def test_resolve_boot_target_ref_last_good_symlink(tmp_path: Path) -> None:
     """--ref last-good：目标取 last-good 符号链接，跳过 --version 一致性校验。"""
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
     _make_distro(tmp_path)
     _add_version(tmp_path, "2026.10")
@@ -390,7 +390,7 @@ def test_resolve_boot_target_ref_last_good_symlink(tmp_path: Path) -> None:
     target = resolve_boot_target("generic", "2026.09", root=tmp_path, ref="last-good")
     assert target.version == "2026.10"
     assert target.tree == (tmp_path / "generic" / "generations" / "2026.10").resolve()
-    with pytest.raises(BootloaderError, match="仅接受 last-good"):
+    with pytest.raises(ToolchainError, match="仅接受 last-good"):
         resolve_boot_target("generic", None, root=tmp_path, ref="branch:main")
 
 
@@ -407,10 +407,10 @@ def test_resolve_boot_target_ref_last_good_falls_back_to_toml(tmp_path: Path) ->
 
 
 def test_resolve_boot_target_ref_last_good_missing(tmp_path: Path) -> None:
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
     _make_distro(tmp_path)
-    with pytest.raises(BootloaderError, match="last-good 未设置"):
+    with pytest.raises(ToolchainError, match="last-good 未设置"):
         resolve_boot_target("generic", None, root=tmp_path, ref="last-good")
 
 
@@ -418,7 +418,7 @@ async def test_run_boot_restore_snapshot_with_yes(
     distro_with_mock_os, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """--restore-snapshot --yes：恢复最近快照 → 重指 current → 启动（跳过确认）。"""
-    import ghrah_bootloader.boot as boot_mod
+    import ghrah_toolchain.boot as boot_mod
 
     root, _ = distro_with_mock_os
     _make_last_good(root)
@@ -459,9 +459,9 @@ async def test_run_boot_restore_snapshot_confirm_declined(
     monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
     monkeypatch.setattr("builtins.input", lambda *a: "n")
     target = resolve_boot_target("generic", None, root=root, ref="last-good")
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
-    with pytest.raises(BootloaderError, match="已取消"):
+    with pytest.raises(ToolchainError, match="已取消"):
         await run_boot(target, no_webui=True, restore_snapshot=True, stop_event=asyncio.Event())
 
 
@@ -475,9 +475,9 @@ async def test_run_boot_restore_snapshot_requires_yes_when_non_tty(
     _make_fake_snapshot(root)
     monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
     target = resolve_boot_target("generic", None, root=root, ref="last-good")
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
-    with pytest.raises(BootloaderError, match="--yes"):
+    with pytest.raises(ToolchainError, match="--yes"):
         await run_boot(target, no_webui=True, restore_snapshot=True, stop_event=asyncio.Event())
 
 
@@ -485,7 +485,7 @@ async def test_run_boot_updates_last_good_after_start(
     distro_with_mock_os, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """健康检查通过后更新 last-good 符号链接 + boot.toml.last_good（失败仅告警）。"""
-    import ghrah_bootloader.boot as boot_mod
+    import ghrah_toolchain.boot as boot_mod
 
     root, layout = distro_with_mock_os
     monkeypatch.setattr(boot_mod, "BootStack", _StubStack)
@@ -513,14 +513,14 @@ def test_resolve_boot_target_current_to_generation(tmp_path: Path) -> None:
 
 def test_resolve_boot_target_generation_escape_still_rejected(tmp_path: Path) -> None:
     """generations 段内多层目标（generations/<gen>/sub）不算单层代，拒绝。"""
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.errors import ToolchainError
 
     _make_distro(tmp_path)
     deep = tmp_path / "generic" / "generations" / "2026.09" / "sub"
     deep.mkdir(parents=True)
     (tmp_path / "generic" / "current").unlink()
     (tmp_path / "generic" / "current").symlink_to(deep)
-    with pytest.raises(BootloaderError, match="之外"):
+    with pytest.raises(ToolchainError, match="之外"):
         resolve_boot_target("generic", None, root=tmp_path)
 
 
@@ -553,14 +553,14 @@ def test_resolve_boot_target_ref_last_good_toml_generation(tmp_path: Path) -> No
 
 
 def _server_entry(venv: Path) -> Path:
-    from ghrah_bootloader.boot import os_server_entry
+    from ghrah_toolchain.boot import os_server_entry
 
     return os_server_entry(venv)
 
 
 def test_resolve_os_server_prefers_current_gen_env(tmp_path: Path) -> None:
     """代目标 OS 入口 = current/env/.venv。"""
-    from ghrah_bootloader.boot import resolve_os_server
+    from ghrah_toolchain.boot import resolve_os_server
 
     layout = _make_gen(tmp_path)
     gen_entry = _server_entry(layout.current / "env" / ".venv")
@@ -570,12 +570,12 @@ def test_resolve_os_server_prefers_current_gen_env(tmp_path: Path) -> None:
 
 def test_resolve_os_server_missing_raises(tmp_path: Path) -> None:
     """代内 env 入口缺失 → 报错（发行级兜底已退役）。"""
-    from ghrah_bootloader.boot import resolve_os_server
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.boot import resolve_os_server
+    from ghrah_toolchain.errors import ToolchainError
 
     layout = _make_gen(tmp_path)
     _server_entry(layout.current / "env" / ".venv").unlink()
-    with pytest.raises(BootloaderError, match="当前代 env 未物化"):
+    with pytest.raises(ToolchainError, match="当前代 env 未物化"):
         resolve_os_server(layout)
 
 
@@ -656,7 +656,7 @@ async def test_run_boot_gen_form_env_injection_and_cwd(
 
 def test_webui_static_root_gen_target(tmp_path: Path) -> None:
     """代目标 → 基座 versions/<base>/observer-web/dist。"""
-    from ghrah_bootloader.boot import webui_static_root
+    from ghrah_toolchain.boot import webui_static_root
 
     _make_gen(tmp_path)
     dist = tmp_path / "generic" / "versions" / "2026.09" / "observer-web" / "dist"
@@ -667,31 +667,31 @@ def test_webui_static_root_gen_target(tmp_path: Path) -> None:
 
 def test_webui_static_root_missing_dist_fail_closed(tmp_path: Path) -> None:
     """代目标 dist 缺失 → fail-closed 报「基座产物不完整」。"""
-    from ghrah_bootloader.boot import webui_static_root
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.boot import webui_static_root
+    from ghrah_toolchain.errors import ToolchainError
 
     _make_gen(tmp_path)  # 基座树在场但无 observer-web/dist
     target = resolve_boot_target("generic", None, root=tmp_path)
-    with pytest.raises(BootloaderError, match="基座产物不完整"):
+    with pytest.raises(ToolchainError, match="基座产物不完整"):
         webui_static_root(target)
 
 
 def test_webui_static_root_non_gen_rejected(tmp_path: Path) -> None:
     """引导目标非组合代 → fail-closed（引导目标恒为代）。"""
-    from ghrah_bootloader.boot import webui_static_root
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.boot import webui_static_root
+    from ghrah_toolchain.errors import ToolchainError
 
     _make_distro(tmp_path)
     # 去掉代的 GENERATION.toml，使 read_generation 不命中
     (tmp_path / "generic" / "generations" / "2026.09" / "GENERATION.toml").unlink()
     target = resolve_boot_target("generic", None, root=tmp_path)
-    with pytest.raises(BootloaderError, match="不是组合代"):
+    with pytest.raises(ToolchainError, match="不是组合代"):
         webui_static_root(target)
 
 
 def test_webui_dev_dir_explicit_arg_wins(tmp_path: Path) -> None:
     """显式参 > repo 推导。"""
-    from ghrah_bootloader.boot import webui_dev_dir
+    from ghrah_toolchain.boot import webui_dev_dir
 
     _make_distro(tmp_path)
     dev = tmp_path / "dev-observer-web"
@@ -706,7 +706,7 @@ def test_webui_dev_dir_explicit_arg_wins(tmp_path: Path) -> None:
 
 def test_webui_dev_dir_repo_derivation(tmp_path: Path) -> None:
     """无显式参 → [distro.repo].path + 包路径推导。"""
-    from ghrah_bootloader.boot import webui_dev_dir
+    from ghrah_toolchain.boot import webui_dev_dir
 
     _make_distro(tmp_path)
     dev = tmp_path / "repo" / "ghrah-observer-webui" / "packages" / "observer-web"
@@ -721,14 +721,14 @@ def test_webui_dev_dir_repo_derivation(tmp_path: Path) -> None:
 
 def test_webui_dev_dir_unavailable_fail_closed(tmp_path: Path) -> None:
     """显式参无效 / 均缺 → fail-closed，报错文案含处置提示（--webui-dev-dir）。"""
-    from ghrah_bootloader.boot import webui_dev_dir
-    from ghrah_bootloader.errors import BootloaderError
+    from ghrah_toolchain.boot import webui_dev_dir
+    from ghrah_toolchain.errors import ToolchainError
 
     _make_distro(tmp_path)  # distro.toml 无 repo 路径
     target = resolve_boot_target("generic", None, root=tmp_path)
-    with pytest.raises(BootloaderError, match="--webui-dev-dir"):
+    with pytest.raises(ToolchainError, match="--webui-dev-dir"):
         webui_dev_dir(target, None)
-    with pytest.raises(BootloaderError, match="--webui-dev-dir"):
+    with pytest.raises(ToolchainError, match="--webui-dev-dir"):
         webui_dev_dir(target, tmp_path / "nope")
 
 
@@ -738,7 +738,7 @@ async def test_run_boot_static_webui_end_to_end(
     """代目标 run_boot → webui 静态 serve 基座 dist + WS 注入；stop 后端口释放。"""
     import http.client
 
-    from ghrah_bootloader.lifecycle import port_in_use
+    from ghrah_toolchain.lifecycle import port_in_use
 
     root, layout = gen_distro_with_mock_os
     dist = root / "generic" / "versions" / "2026.09" / "observer-web" / "dist"

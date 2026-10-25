@@ -2,7 +2,7 @@
 #
 # # SPDX-License-Identifier: Apache-2.0
 
-"""ghrah-bootloader 命令面（distro/install/config/boot/stop/runtime/doctor）。
+"""ghrah-toolchain 命令面（distro/install/config/boot/stop/runtime/doctor）。
 
 纯性硬约束：本模块及其 import 图**零 ``ghrah.*``、零第三方运行时依赖**
 （仅 stdlib）。install / runtime update 经 ``RuntimeRefManager`` 承载
@@ -13,18 +13,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
 from pathlib import Path
 
-from ghrah_bootloader import __version__
-from ghrah_bootloader.adopt import adopt as adopt_legacy
-from ghrah_bootloader.adopt import detect_legacy
-from ghrah_bootloader.boot import resolve_boot_target, run_boot, stop_boot_session
-from ghrah_bootloader.build import build_artifacts, verify_artifacts
-from ghrah_bootloader.errors import BootloaderError, RuntimeRefError
-from ghrah_bootloader.layout import (
+from ghrah_toolchain import __version__
+from ghrah_toolchain.adopt import adopt as adopt_legacy
+from ghrah_toolchain.adopt import detect_legacy
+from ghrah_toolchain.boot import resolve_boot_target, run_boot
+from ghrah_toolchain.build import build_artifacts, verify_artifacts
+from ghrah_toolchain.errors import RuntimeRefError, ToolchainError
+from ghrah_toolchain.layout import (
     BootToml,
     DistroLayout,
     DistroToml,
@@ -33,8 +34,8 @@ from ghrah_bootloader.layout import (
     render_distro_toml,
     resolve_distro_root,
 )
-from ghrah_bootloader.materialize import read_generation
-from ghrah_bootloader.runtime_ref import RefSource, RuntimeRefManager
+from ghrah_toolchain.materialize import read_generation
+from ghrah_toolchain.runtime_ref import RefSource, RuntimeRefManager
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ def _cmd_distro_list(args: argparse.Namespace) -> int:
         current = ""
         try:
             current = layout.current.resolve().name
-        except (OSError, RuntimeError):
+        except OSError, RuntimeError:
             current = "-"
         rendered = ", ".join(
             f"{v}@{_short(entries.get((distro, v)).commit if entries.get((distro, v)) else None)}"
@@ -120,14 +121,14 @@ def _cmd_distro_list(args: argparse.Namespace) -> int:
 
 def _cmd_install(args: argparse.Namespace) -> int:
     """安装发行版版本：建 distro.toml（首装）→ 门禁 → 快照 → 重指 → 写配置。"""
-    distro = args.distro
+    distro = _instance_name(args)
     root = ghrah_root()
     distro_root = resolve_distro_root(distro, root)
     distro_toml = DistroToml.load(distro_root)
     repo_arg = args.repo or os.environ.get("GHRAH_MONOREPO_ROOT")
     if not distro_root.is_dir() or not distro_toml.repo_path:
         if not repo_arg:
-            raise BootloaderError("首次安装需要 --repo 或 env GHRAH_MONOREPO_ROOT 指定运行时仓路径")
+            raise ToolchainError("首次安装需要 --repo 或 env GHRAH_MONOREPO_ROOT 指定运行时仓路径")
         distro_root.mkdir(parents=True, exist_ok=True)
         rendered = render_distro_toml(
             name=distro,
@@ -174,7 +175,7 @@ def _cmd_runtime_status(args: argparse.Namespace) -> int:
     boot = BootToml.load()
     distro = args.distro or _default_distro(boot)
     if not distro:
-        print("（尚未安装任何发行版：先 ghrah-bootloader install --distro <n> ...）")
+        print("（尚未安装任何发行版：先 ghrah-toolchain install --distro <n> ...）")
         return 0
     distro_root = resolve_distro_root(distro)
     layout = DistroLayout(root=distro_root)
@@ -218,7 +219,7 @@ def _cmd_runtime_status(args: argparse.Namespace) -> int:
     if lg.is_symlink() or lg.exists():
         try:
             lg_ver = lg.resolve().name
-        except (OSError, RuntimeError):
+        except OSError, RuntimeError:
             lg_ver = "-"
     print(f"[{distro}] last_good = {boot.last_good!r}（符号链接 → {lg_ver}）")
     return 0
@@ -229,7 +230,7 @@ def _cmd_runtime_update(args: argparse.Namespace) -> int:
     boot = BootToml.load()
     distro = args.distro or _default_distro(boot)
     if not distro:
-        raise BootloaderError("未指定发行版：提供 --distro 或在 boot.toml 设置 default")
+        raise ToolchainError("未指定发行版：提供 --distro 或在 boot.toml 设置 default")
     distro_toml = DistroToml.load(resolve_distro_root(distro))
     manager = RuntimeRefManager(repo=args.repo)
     entry = manager.ensure(
@@ -250,13 +251,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
     """构建发行物：源仓候选 commit → wheels/tarballs/observer-web/manifest（不动安装域）。"""
     repo_arg = args.repo or os.environ.get("GHRAH_MONOREPO_ROOT")
     if not repo_arg:
-        raise BootloaderError("构建需要 --repo 或 env GHRAH_MONOREPO_ROOT 指定运行时仓路径")
+        raise ToolchainError("构建需要 --repo 或 env GHRAH_MONOREPO_ROOT 指定运行时仓路径")
     repo = Path(repo_arg).expanduser()
     if not repo.is_dir():
-        raise BootloaderError(f"运行时仓路径不存在: {repo}")
+        raise ToolchainError(f"运行时仓路径不存在: {repo}")
     source = RefSource.parse(args.ref)
     commit = RuntimeRefManager()._resolve_candidate(source, fetch=False, repo=repo)  # noqa: SLF001
-    out_dir = Path(args.out).expanduser() if args.out else repo / "dist" / "bootloader" / commit[:7]
+    out_dir = Path(args.out).expanduser() if args.out else repo / "dist" / "toolchain" / commit[:7]
     result = build_artifacts(repo, commit, out_dir=out_dir)
     print(f"构建完成: {result.out_dir}")
     print(f"source_commit = {result.source_commit}")
@@ -277,10 +278,26 @@ def _cmd_build(args: argparse.Namespace) -> int:
 def _cmd_boot(args: argparse.Namespace) -> int:
     """引导：解析目标 →（救援：恢复快照/重指）→ spawn OS（+ 前端）→ 监督。"""
     if args.restore_snapshot and args.ref != "last-good":
-        raise BootloaderError("--restore-snapshot 需配合 --ref last-good（数据回滚救援）")
+        raise ToolchainError("--restore-snapshot 需配合 --ref last-good（数据回滚救援）")
     if args.no_webui and (args.webui_dev or args.webui_dev_dir):
-        raise BootloaderError("--no-webui 与 --webui-dev/--webui-dev-dir 互斥")
-    target = resolve_boot_target(args.distro, args.version, ref=args.ref)
+        raise ToolchainError("--no-webui 与 --webui-dev/--webui-dev-dir 互斥")
+    from ghrah_toolchain.instances import start_instance
+
+    name = _instance_name(args)
+    if not args.foreground:
+        if args.ref or args.restore_snapshot or args.webui_dev or args.webui_dev_dir:
+            raise ToolchainError("救援或前端开发模式需显式使用 --foreground")
+        resolve_boot_target(name, args.version)
+        state = start_instance(name, no_webui=args.no_webui)
+        _print_state(state, args.json)
+        return 0
+    if not (args.ref or args.restore_snapshot or args.webui_dev or args.webui_dev_dir):
+        result = start_instance(name, no_webui=args.no_webui, foreground=True)
+        if isinstance(result, dict):
+            _print_state(result, args.json)
+            return 0
+        return result
+    target = resolve_boot_target(name, args.version, ref=args.ref)
     return asyncio.run(
         run_boot(
             target,
@@ -296,18 +313,82 @@ def _cmd_boot(args: argparse.Namespace) -> int:
 
 def _cmd_stop(args: argparse.Namespace) -> int:
     """停止：向运行中的 boot 会话转发 SIGTERM（pidfile 定位 + cmdline 护栏）。"""
-    boot = BootToml.load()
-    distro = args.distro or _default_distro(boot)
-    if not distro:
-        raise BootloaderError("未指定发行版：提供 --distro 或在 boot.toml 设置 default")
-    return stop_boot_session(distro)
+    from ghrah_toolchain.instances import stop_instance
+
+    name = _instance_name(args)
+    code = stop_instance(name, timeout=args.timeout)
+    if code == 0:
+        print(f"[{name}] 已停止")
+    return code
+
+
+def _instance_name(args: argparse.Namespace) -> str:
+    if args.name and args.distro and args.name != args.distro:
+        raise ToolchainError("实例位置参数与 --distro 冲突")
+    name = args.name or args.distro or _default_distro(BootToml.load())
+    if not name:
+        raise ToolchainError("未指定实例名称，且未配置默认实例")
+    resolve_distro_root(name)
+    return name
+
+
+def _print_state(state: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps({"schema": 1, "scope": "user", "data": state}, ensure_ascii=False))
+    else:
+        print(f"[{state['name']}] {state['state']} (pid={state.get('pid', '-')})")
+        if state.get("log"):
+            print(f"日志: {state['log']}；使用 ghrah logs {state['name']} 查看")
+
+
+def _cmd_list(args: argparse.Namespace) -> int:
+    from ghrah_toolchain.instances import list_instances
+
+    states = list_instances()
+    if args.json:
+        print(json.dumps({"schema": 1, "scope": "user", "data": states}, ensure_ascii=False))
+    else:
+        for state in states:
+            print(f"{state['name']}\t{state['state']}\t{state.get('pid', '-')}")
+    return 0
+
+
+def _cmd_logs(args: argparse.Namespace) -> int:
+    from ghrah_toolchain.instances import read_logs
+
+    if args.tail < 0:
+        raise ToolchainError("--tail 不能为负数")
+    print(read_logs(_instance_name(args), tail=args.tail), end="")
+    return 0
+
+
+def _cmd_manifest(args: argparse.Namespace) -> int:
+    from ghrah_toolchain.manifest import load_manifest
+
+    manifest = load_manifest(args.manifest_path)
+    if args.json or args.command == "metadata":
+        print(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "scope": "workspace",
+                    "data": manifest.metadata(),
+                    "diagnostics": [],
+                },
+                ensure_ascii=False,
+            )
+        )
+    else:
+        print(f"静态校验通过: {manifest.path}")
+        print("未启动组件，未应用运行时绑定或 Agent 授权。")
+    return 0
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """诊断：安装域布局、boot.toml、各发行版 current commit / last_good / 落后。"""
     del args
     boot = BootToml.load()
-    print(f"ghrah-bootloader {__version__}")
+    print(f"ghrah-toolchain {__version__}")
     print(f"default={boot.default!r} fallback={boot.fallback!r} last_good={boot.last_good!r}")
     manager = RuntimeRefManager()
     for distro in list_distros():
@@ -319,7 +400,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             current_target = str(tree)
             info = read_generation(tree)
             commit = info.base_commit if info is not None else manager._tree_commit(tree)
-        except (OSError, RuntimeError):
+        except OSError, RuntimeError:
             current_target = "(current 缺失)"
         behind = "候选不可解析"
         try:
@@ -353,19 +434,38 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ghrah-bootloader",
-        description="ghrah AgentOS 安装/配置工具与引导器",
+        prog="ghrah",
+        description="ghrah 开发、组合校验与具名实例管理工具链",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command")
+
+    for command in ("check", "metadata"):
+        manifest = subparsers.add_parser(command, help="离线校验或查询源码组合清单")
+        manifest.add_argument("--manifest-path", type=Path)
+        manifest.add_argument("--json", action="store_true")
+        manifest.set_defaults(func=_cmd_manifest)
+
+    listing = subparsers.add_parser("list", aliases=["ps"], help="枚举已安装具名实例及状态")
+    listing.add_argument("--json", action="store_true")
+    listing.set_defaults(func=_cmd_list)
+
+    logs = subparsers.add_parser("logs", help="查看实例最近一次启动的日志")
+    logs.add_argument("name", nargs="?")
+    logs.add_argument("--distro")
+    logs.add_argument("--tail", type=int, default=100)
+    logs.set_defaults(func=_cmd_logs)
 
     distro = subparsers.add_parser("distro", help="发行版管理")
     distro_sub = distro.add_subparsers(dest="subcommand")
     distro_list = distro_sub.add_parser("list", help="列出发行版与版本")
     distro_list.set_defaults(func=_cmd_distro_list)
 
-    install = subparsers.add_parser("install", help="安装一个发行版版本")
-    install.add_argument("--distro", required=True, help="发行版名")
+    install = subparsers.add_parser(
+        "install", aliases=["create"], help="创建已安装具名实例，不启动"
+    )
+    install.add_argument("name", nargs="?", help="实例名称")
+    install.add_argument("--distro", help="实例名称（兼容参数）")
     install.add_argument("--version", help="版本名（缺省取候选提交日期 %%Y.%%m）")
     install.add_argument("--ref", help="签出源（latest | branch:<n> | commit:<sha>）")
     install.add_argument("--gate", help="门禁级别（basic | full | data）")
@@ -395,7 +495,7 @@ def _build_parser() -> argparse.ArgumentParser:
     build = subparsers.add_parser("build", help="从源仓构建发行物（wheels/tarballs/manifest）")
     build.add_argument("--repo", help="运行时仓路径（覆盖 env GHRAH_MONOREPO_ROOT）")
     build.add_argument("--ref", help="签出源（latest | branch:<n> | commit:<sha>），缺省 latest")
-    build.add_argument("--out", help="产物目录（缺省 <repo>/dist/bootloader/<short7>/）")
+    build.add_argument("--out", help="产物目录（缺省 <repo>/dist/toolchain/<short7>/）")
     build.add_argument(
         "--no-verify",
         action="store_true",
@@ -404,8 +504,11 @@ def _build_parser() -> argparse.ArgumentParser:
     build.set_defaults(func=_cmd_build)
 
     boot = subparsers.add_parser(
-        "boot", aliases=["start", "webui"], help="引导发行版（spawn OS + 前端子进程）"
+        "start", aliases=["boot"], help="启动已安装实例并立即返回，输出写入实例日志"
     )
+    boot.add_argument("name", nargs="?", help="已安装实例名")
+    boot.add_argument("--foreground", action="store_true", help="显式在当前终端运行和监督")
+    boot.add_argument("--json", action="store_true")
     boot.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
     boot.add_argument("--version", help="期望版本（须与 current 一致；切换走 install/update）")
     boot.add_argument("--ref", choices=["last-good"], help="救援入口：引导已知良好版本")
@@ -428,8 +531,10 @@ def _build_parser() -> argparse.ArgumentParser:
     boot.add_argument("--no-browser", action="store_true", help="不打开浏览器")
     boot.set_defaults(func=_cmd_boot)
 
-    stop = subparsers.add_parser("stop", help="停止运行中的引导栈")
+    stop = subparsers.add_parser("stop", help="幂等停止实例及其受管子进程")
+    stop.add_argument("name", nargs="?")
     stop.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
+    stop.add_argument("--timeout", type=float, default=15.0)
     stop.set_defaults(func=_cmd_stop)
 
     doctor = subparsers.add_parser("doctor", help="诊断安装域布局与配置")
@@ -450,9 +555,22 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return args.func(args)
-    except BootloaderError as e:
-        print(f"[错误] {e}", file=sys.stderr)
-        return 1
+    except ToolchainError as e:
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "scope": "workspace" if args.command in {"check", "metadata"} else "user",
+                        "data": None,
+                        "diagnostics": [str(e)],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(f"[错误] {e}", file=sys.stderr)
+        return getattr(e, "exit_code", 1)
 
 
 if __name__ == "__main__":

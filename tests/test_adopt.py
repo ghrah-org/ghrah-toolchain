@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from ghrah_bootloader import adopt as adopt_mod
-from ghrah_bootloader.adopt import adopt, detect_legacy
-from ghrah_bootloader.errors import AdoptError
-from ghrah_bootloader.layout import DistroLayout, DistroToml
+from ghrah_toolchain import adopt as adopt_mod
+from ghrah_toolchain.adopt import adopt, detect_legacy
+from ghrah_toolchain.errors import AdoptError
+from ghrah_toolchain.layout import DistroLayout, DistroToml
 
 
 @pytest.fixture

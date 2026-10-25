@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from ghrah_bootloader.layout import (
+from ghrah_toolchain.layout import (
     BootToml,
     DistroLayout,
     DistroToml,
@@ -55,7 +55,7 @@ def test_boot_toml_parse(home: Path) -> None:
 
 
 def test_boot_toml_invalid_raises(home: Path) -> None:
-    from ghrah_bootloader.errors import LayoutError
+    from ghrah_toolchain.errors import LayoutError
 
     home.mkdir(parents=True, exist_ok=True)
     (home / "boot.toml").write_text("not [ valid toml ==", encoding="utf-8")
@@ -75,9 +75,36 @@ def test_distro_toml_missing_returns_defaults(home: Path) -> None:
     assert d.snapshot_keep == 3
 
 
+@pytest.mark.parametrize(
+    ("document", "scenario", "repo_path"),
+    [
+        (
+            'distro = {\n scenario = "multiline",\n repo = {path = "/work/repo"},\n}\n',
+            "multiline",
+            "/work/repo",
+        ),
+        (r'distro = { scenario = "\x41" }', "A", ""),
+        (r'distro = { scenario = "\e[demo]" }', "\x1b[demo]", ""),
+    ],
+    ids=["multiline-inline-table", "hex-escape", "escape-character"],
+)
+def test_distro_toml_reads_toml_11(
+    home: Path, document: str, scenario: str, repo_path: str
+) -> None:
+    """实际配置读取入口支持 TOML 1.1 新增语法。"""
+    distro_dir = home / "generic"
+    distro_dir.mkdir(parents=True)
+    (distro_dir / "distro.toml").write_text(document, encoding="utf-8")
+
+    distro = DistroToml.load(distro_dir)
+
+    assert distro.scenario == scenario
+    assert distro.repo_path == repo_path
+
+
 def test_distro_toml_install_mode_worktree_retired(home: Path) -> None:
     """install_mode = "worktree" 已退役 → load 显式报错（不静默容忍）。"""
-    from ghrah_bootloader.errors import LayoutError
+    from ghrah_toolchain.errors import LayoutError
 
     distro_dir = home / "generic"
     distro_dir.mkdir(parents=True)
@@ -94,7 +121,7 @@ install_mode = "worktree"
 
 def test_distro_toml_install_mode_key_retired(home: Path) -> None:
     """install_mode 键整体退役（任何值都报错，提示删除）。"""
-    from ghrah_bootloader.errors import LayoutError
+    from ghrah_toolchain.errors import LayoutError
 
     distro_dir = home / "generic"
     distro_dir.mkdir(parents=True)
@@ -166,7 +193,7 @@ def test_list_distros_enumerates_only_dirs(home: Path) -> None:
 
 
 def test_resolve_distro_root_rejects_bad_names(home: Path) -> None:
-    from ghrah_bootloader.errors import LayoutError
+    from ghrah_toolchain.errors import LayoutError
 
     with pytest.raises(LayoutError):
         resolve_distro_root("")

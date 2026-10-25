@@ -7,37 +7,37 @@
 from __future__ import annotations
 
 
-class BootloaderError(Exception):
+class ToolchainError(Exception):
     """引导器基础错误。"""
 
 
-class RuntimeRefError(BootloaderError):
+class RuntimeRefError(ToolchainError):
     """版本引用解析/切换失败（候选无效、门禁拒绝或同步失败）。"""
 
 
-class GateError(BootloaderError):
+class GateError(ToolchainError):
     """启动门禁失败（basic / full / data 任一级别未通过）。"""
 
 
-class LayoutError(BootloaderError):
+class LayoutError(ToolchainError):
     """~/.ghrah 安装域布局读写错误。"""
 
 
-class SnapshotError(BootloaderError):
+class SnapshotError(ToolchainError):
     """数据盘快照拍取/滚动/恢复失败。"""
 
 
-class AdoptError(BootloaderError):
+class AdoptError(ToolchainError):
     """旧数据认领失败（守卫拒绝或移动中断已回搬）。"""
 
 
-class BuildError(BootloaderError):
+class BuildError(ToolchainError):
     """发行物构建/验证失败（子进程失败、产物不完整或校验不过）。"""
 
 
-class MaterializeError(BootloaderError):
+class MaterializeError(ToolchainError):
     """组合代物化失败（env 装配、清单读写或完整性校验不过）。"""
 
 
-class WinProcError(BootloaderError):
+class WinProcError(ToolchainError):
     """Windows 进程探测/链接原语失败（pid 探测异常、重指复核不一致等）。"""

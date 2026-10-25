@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from ghrah_bootloader.runtime_ref import RuntimeRefManager
+from ghrah_toolchain.runtime_ref import RuntimeRefManager
 
 pytestmark = pytest.mark.integration
 
@@ -104,7 +104,7 @@ class TestInstallPackagesMode:
         assert entry.commit in bootstrap_commit
 
         # 组合代物化（无插件 gen_id = 基座版本名；entry.path 即代目录）
-        from ghrah_bootloader.materialize import FINGERPRINT_NAME, read_generation
+        from ghrah_toolchain.materialize import FINGERPRINT_NAME, read_generation
 
         assert entry.kind == "generation"
         gen = home_packages / "generic" / "generations" / entry.version
@@ -151,7 +151,7 @@ class TestInstallPackagesMode:
         assert second.version == entry.version
         assert second.path == entry.path
         assert fp.stat().st_mtime_ns == fp_mtime
-        from ghrah_bootloader.layout import DistroLayout
+        from ghrah_toolchain.layout import DistroLayout
 
         layout = DistroLayout(root=home_packages / "generic")
         assert layout.list_versions() == [entry.version]
@@ -196,7 +196,7 @@ class TestBootGeneration:
         import asyncio as _asyncio
         import time as _time
 
-        from ghrah_bootloader.lifecycle import port_in_use
+        from ghrah_toolchain.lifecycle import port_in_use
 
         deadline = _time.monotonic() + timeout
         while port_in_use("127.0.0.1", port) != listening:
@@ -211,7 +211,7 @@ class TestBootGeneration:
         import asyncio as _asyncio
         import http.client as _http
 
-        from ghrah_bootloader.boot import resolve_boot_target, run_boot
+        from ghrah_toolchain.boot import resolve_boot_target, run_boot
 
         _require("uv", "pnpm", "git")
         mgr = RuntimeRefManager(root=home_packages, repo=repo)

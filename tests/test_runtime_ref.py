@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
-from ghrah_bootloader.errors import GateError, RuntimeRefError
-from ghrah_bootloader.layout import BootToml, DistroLayout, DistroToml
-from ghrah_bootloader.runtime_ref import (
+from ghrah_toolchain.errors import GateError, RuntimeRefError
+from ghrah_toolchain.layout import BootToml, DistroLayout, DistroToml
+from ghrah_toolchain.runtime_ref import (
     BootEntry,
     RefSource,
     RuntimeRefManager,
@@ -35,7 +35,7 @@ from ghrah_bootloader.runtime_ref import (
 @pytest.fixture(autouse=True)
 def _no_running_os(monkeypatch: pytest.MonkeyPatch) -> None:
     """默认视端口为空闲（避免真实环境里 4112 恰被占用导致用例漂移）。"""
-    monkeypatch.setattr("ghrah_bootloader.runtime_ref.port_in_use", lambda host, port: False)
+    monkeypatch.setattr("ghrah_toolchain.runtime_ref.port_in_use", lambda host, port: False)
 
 
 # ── 仓与安装域夹具 ───────────────────────────────────────────
@@ -126,7 +126,7 @@ def _materialize_fake_artifacts(tree: Path, commit: str) -> None:
 
 def _materialize_fake_generation(gen_dir: Path, spec) -> None:
     """物化最小代骨架（GENERATION + 指纹 + env 完整性探针所需文件）。"""
-    from ghrah_bootloader.materialize import (
+    from ghrah_toolchain.materialize import (
         FINGERPRINT_NAME,
         GENERATION_TOML,
         generation_fingerprint,
@@ -167,7 +167,7 @@ def fake_build(monkeypatch: pytest.MonkeyPatch, repo: Path):
     def _gate_generation(self_or_dir, gen_dir=None):
         calls.setdefault("gate", []).append(Path(gen_dir if gen_dir is not None else self_or_dir))
 
-    import ghrah_bootloader.runtime_ref as rr
+    import ghrah_toolchain.runtime_ref as rr
 
     monkeypatch.setattr(rr, "materialize_generation", _materialize)
     monkeypatch.setattr(rr, "build_artifacts", _build)
@@ -420,7 +420,7 @@ def test_switch_order_gate_snapshot_repoint(
     monkeypatch.setattr(mgr, "_snapshot", lambda *a, **k: order.append("snapshot") or None)
     real_repoint = repoint_current
     monkeypatch.setattr(
-        "ghrah_bootloader.runtime_ref.repoint_current",
+        "ghrah_toolchain.runtime_ref.repoint_current",
         lambda distro_root, ver: order.append("repoint") or real_repoint(distro_root, ver),
     )
     # 首次安装：无旧 current → 不拍快照
@@ -498,7 +498,7 @@ def test_stale_lock_with_dead_pid_recycled(home: Path, repo: Path, fake_build) -
 
 
 def test_rejects_when_running(home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("ghrah_bootloader.runtime_ref.port_in_use", lambda host, port: True)
+    monkeypatch.setattr("ghrah_toolchain.runtime_ref.port_in_use", lambda host, port: True)
     mgr = _mgr(home, repo)
     with pytest.raises(RuntimeRefError, match="占用"):
         mgr.ensure(distro="generic")
@@ -528,7 +528,7 @@ def test_gate_full_and_data_rejected(home: Path, repo: Path) -> None:
 
 
 def test_tree_commit_bootstrap_only(home: Path, repo: Path) -> None:
-    from ghrah_bootloader.build import read_source_commit
+    from ghrah_toolchain.build import read_source_commit
 
     mgr = _mgr(home, repo)
     versions = home / "generic" / "versions"
@@ -567,8 +567,8 @@ def test_tree_commit_bootstrap_only(home: Path, repo: Path) -> None:
 
 def test_pid_alive_nt_dispatches_to_winproc(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """nt 下 _pid_alive 分派 winproc.pid_alive（三值透传，恒真桩退役）。"""
-    from ghrah_bootloader import runtime_ref
-    from ghrah_bootloader import winproc as winproc_mod
+    from ghrah_toolchain import runtime_ref
+    from ghrah_toolchain import winproc as winproc_mod
 
     calls: list[int] = []
 
@@ -596,7 +596,7 @@ def test_lock_is_stale_three_valued(home: Path, monkeypatch: pytest.MonkeyPatch)
     """锁陈旧判定三值适配：None 不判死（时间兜底仍在），False 判死。"""
     import time as time_mod
 
-    from ghrah_bootloader import runtime_ref
+    from ghrah_toolchain import runtime_ref
 
     lock = home / ".bootloader.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -621,8 +621,8 @@ def test_repoint_nt_dispatches_to_winproc(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """nt 下 _repoint_link 分派 winproc.repoint_dir_link（段固定 generations）。"""
-    from ghrah_bootloader import runtime_ref
-    from ghrah_bootloader import winproc as winproc_mod
+    from ghrah_toolchain import runtime_ref
+    from ghrah_toolchain import winproc as winproc_mod
 
     distro_root = home / "generic"
     gen_dir = distro_root / "generations" / "2026.09"
@@ -646,9 +646,9 @@ def test_repoint_nt_maps_winproc_error(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """winproc 失败 → RuntimeRefError（fail-closed 映射，含策略上下文）。"""
-    from ghrah_bootloader import runtime_ref
-    from ghrah_bootloader import winproc as winproc_mod
-    from ghrah_bootloader.errors import RuntimeRefError, WinProcError
+    from ghrah_toolchain import runtime_ref
+    from ghrah_toolchain import winproc as winproc_mod
+    from ghrah_toolchain.errors import RuntimeRefError, WinProcError
 
     distro_root = home / "generic"
     (distro_root / "generations" / "2026.09").mkdir(parents=True)
@@ -664,8 +664,8 @@ def test_repoint_nt_maps_winproc_error(
 
 def test_repoint_posix_fast_path_unchanged(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """posix 快路径：仍走 tmp symlink + os.replace（零改动回归位）。"""
-    from ghrah_bootloader import runtime_ref
-    from ghrah_bootloader import winproc as winproc_mod
+    from ghrah_toolchain import runtime_ref
+    from ghrah_toolchain import winproc as winproc_mod
 
     distro_root = home / "generic"
     gen = distro_root / "generations" / "2026.09"

@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from ghrah_bootloader.errors import MaterializeError
-from ghrah_bootloader.materialize import (
+from ghrah_toolchain.errors import MaterializeError
+from ghrah_toolchain.materialize import (
     FINGERPRINT_NAME,
     GENERATION_TOML,
     GenerationSpec,
@@ -98,7 +98,7 @@ def fake_procs(monkeypatch: pytest.MonkeyPatch):
             (Path(cwd) / "node_modules").mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-    import ghrah_bootloader.materialize as mz
+    import ghrah_toolchain.materialize as mz
 
     monkeypatch.setattr(mz, "_run", fake_run)
     return type("FakeProcs", (), {"calls": calls, "fail_first": fail_first})()
@@ -138,7 +138,7 @@ def test_m2_fingerprint_excludes_built_at() -> None:
 
 def test_m2b_render_canonical_vs_final() -> None:
     spec = _spec()
-    from ghrah_bootloader.materialize import render_generation_toml
+    from ghrah_toolchain.materialize import render_generation_toml
 
     canonical = render_generation_toml(spec, built_at=None)
     final = render_generation_toml(spec, built_at="2026-09-25T00:00:00Z")

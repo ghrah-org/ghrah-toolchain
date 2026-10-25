@@ -18,8 +18,8 @@ import time
 import tomllib
 from pathlib import Path
 
-from ghrah_bootloader.errors import SnapshotError
-from ghrah_bootloader.layout import (
+from ghrah_toolchain.errors import SnapshotError
+from ghrah_toolchain.layout import (
     DistroLayout,
     DistroToml,
     resolve_data_root,
@@ -66,7 +66,7 @@ def take(
     snap_dir.mkdir(parents=True)
     shutil.copytree(data_root, snap_dir / "data", symlinks=True)
     meta = [
-        "# ghrah-bootloader 数据盘快照元数据",
+        "# ghrah-toolchain 数据盘快照元数据",
         f'old_version = "{_escape(old_ver)}"',
         f'old_commit = "{_escape(old_commit)}"',
         f'new_version = "{_escape(new_entry.version)}"',

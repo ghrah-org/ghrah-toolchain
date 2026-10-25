@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ghrah_bootloader.errors import MaterializeError
+from ghrah_toolchain.errors import MaterializeError
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ def read_generation(gen_dir: Path) -> GenerationInfo | None:
         return None
     try:
         data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-    except (tomllib.TOMLDecodeError, OSError):
+    except tomllib.TOMLDecodeError, OSError:
         return None
     section = data.get("generation", {})
     plugins = tuple(

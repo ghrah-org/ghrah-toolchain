@@ -27,12 +27,13 @@ import logging
 import os
 import signal
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ghrah_bootloader import snapshot
-from ghrah_bootloader.errors import BootloaderError
-from ghrah_bootloader.layout import (
+from ghrah_toolchain import snapshot
+from ghrah_toolchain.errors import ToolchainError
+from ghrah_toolchain.layout import (
     BootToml,
     DistroLayout,
     DistroToml,
@@ -41,9 +42,9 @@ from ghrah_bootloader.layout import (
     ghrah_root,
     resolve_data_root,
 )
-from ghrah_bootloader.lifecycle import DEFAULT_HOST, BootStack, StackConfig, port_in_use
-from ghrah_bootloader.materialize import read_generation
-from ghrah_bootloader.runtime_ref import (
+from ghrah_toolchain.lifecycle import DEFAULT_HOST, BootStack, StackConfig, port_in_use
+from ghrah_toolchain.materialize import read_generation
+from ghrah_toolchain.runtime_ref import (
     _pid_alive,
     acquire_distro_lock,
     repoint_current,
@@ -91,18 +92,16 @@ def _write_boot_pid(distro_root: Path) -> None:
     if path.exists():
         try:
             old = int(path.read_text(encoding="utf-8").strip() or "0")
-        except (OSError, ValueError):
+        except OSError, ValueError:
             old = 0
         alive = _pid_alive(old)
         if alive is None:
-            raise BootloaderError(
+            raise ToolchainError(
                 f"无法探测旧 boot 会话 pid={old} 是否存活 ({path})；"
                 "请人工确认无会话运行后删除该文件再试"
             )
         if alive:
-            raise BootloaderError(
-                f"已有 boot 会话在运行 (pid={old}, {path})；请先 ghrah-bootloader stop"
-            )
+            raise ToolchainError(f"已有 boot 会话在运行 (pid={old}, {path})；请先 ghrah stop")
         logger.warning("回收陈旧 boot pidfile: %s (pid=%s)", path, old)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{os.getpid()}\n", encoding="utf-8")
@@ -113,7 +112,7 @@ def _clear_boot_pid(distro_root: Path) -> None:
     path = boot_pid_path(distro_root)
     try:
         current = int(path.read_text(encoding="utf-8").strip() or "0")
-    except (FileNotFoundError, OSError, ValueError):
+    except FileNotFoundError, OSError, ValueError:
         return
     if current == os.getpid():
         with contextlib.suppress(OSError):
@@ -146,7 +145,7 @@ def os_server_command(venv: Path) -> list[str]:
     """OS 进程命令：给定 venv 的 ``ghrah-subject-server`` 入口（纯 venv→命令助手）。"""
     server = os_server_entry(venv)
     if not server.is_file():
-        raise BootloaderError(f"OS server 入口缺失: {server}（发行版 env 未物化，请先完成安装）")
+        raise ToolchainError(f"OS server 入口缺失: {server}（发行版 env 未物化，请先完成安装）")
     return [str(server)]
 
 
@@ -159,7 +158,7 @@ def resolve_os_server(layout: DistroLayout) -> list[str]:
     gen_venv = layout.current / "env" / ".venv"
     if os_server_entry(gen_venv).is_file():
         return os_server_command(gen_venv)
-    raise BootloaderError(f"OS server 入口缺失: {gen_venv}（当前代 env 未物化，请先完成安装）")
+    raise ToolchainError(f"OS server 入口缺失: {gen_venv}（当前代 env 未物化，请先完成安装）")
 
 
 def webui_static_root(target: BootTarget) -> Path:
@@ -170,10 +169,10 @@ def webui_static_root(target: BootTarget) -> Path:
     """
     info = read_generation(target.tree)
     if info is None:
-        raise BootloaderError(f"引导目标不是组合代: {target.tree}（current 只指向 generations/）")
+        raise ToolchainError(f"引导目标不是组合代: {target.tree}（current 只指向 generations/）")
     dist = target.layout.versions / info.base_version / "observer-web" / "dist"
     if not dist.is_dir():
-        raise BootloaderError(
+        raise ToolchainError(
             f"基座产物不完整: {dist} 缺失（observer-web dist）；重新 install 修复基座树"
         )
     return dist
@@ -184,7 +183,7 @@ def webui_dev_dir(target: BootTarget, dev_dir_arg: str | Path | None) -> Path:
     if dev_dir_arg is not None:
         dev_dir = Path(dev_dir_arg).expanduser()
         if not dev_dir.is_dir():
-            raise BootloaderError(
+            raise ToolchainError(
                 f"--webui-dev-dir 无效: {dev_dir} 不是目录；"
                 "应指向开发域源码树的 observer-web 包目录"
             )
@@ -194,7 +193,7 @@ def webui_dev_dir(target: BootTarget, dev_dir_arg: str | Path | None) -> Path:
         dev_dir = Path(repo_path).expanduser().joinpath(*_WEBUI_PACKAGE_RELPATH)
         if dev_dir.is_dir():
             return dev_dir
-    raise BootloaderError(
+    raise ToolchainError(
         "开发域路径不可用：提供 --webui-dev-dir（开发域源码树的 observer-web 包目录），"
         "或在 distro.toml [distro.repo].path 配置有效源仓路径"
     )
@@ -208,7 +207,7 @@ def _within_managed_segment(layout: DistroLayout, tree: Path) -> bool:
     """
     try:
         rel = tree.relative_to(layout.generations.resolve())
-    except (ValueError, OSError):
+    except ValueError, OSError:
         return False
     return len(rel.parts) == 1
 
@@ -228,32 +227,32 @@ def resolve_boot_target(
     承载；boot 只从解析出的目标引导。
     """
     if ref is not None and ref != _LAST_GOOD_REF:
-        raise BootloaderError(f"--ref 仅接受 last-good（收到 {ref!r}）")
+        raise ToolchainError(f"--ref 仅接受 last-good（收到 {ref!r}）")
     base = root or ghrah_root()
     boot = BootToml.load(base)
     distro = distro_arg or (boot.default.split("/", 1)[0] if boot.default else "")
     if not distro and ref == _LAST_GOOD_REF and boot.last_good and "/" in boot.last_good:
         distro = boot.last_good.split("/", 1)[0]
     if not distro:
-        raise BootloaderError("未指定发行版：提供 --distro 或在 boot.toml 设置 default")
+        raise ToolchainError("未指定发行版：提供 --distro 或在 boot.toml 设置 default")
     distro_root = base / distro
     if not distro_root.is_dir():
-        raise BootloaderError(f"发行版未安装: {distro}（{distro_root} 不存在）")
+        raise ToolchainError(f"发行版未安装: {distro}（{distro_root} 不存在）")
     layout = DistroLayout(root=distro_root)
     if ref == _LAST_GOOD_REF:
         tree = _resolve_last_good_tree(layout, boot, distro)
         version = tree.name
     else:
         if not layout.current.exists():
-            raise BootloaderError(
+            raise ToolchainError(
                 f"current 未指向任何版本: {layout.current}（先安装发行版并重指 current）"
             )
         tree = layout.current.resolve()
         if not _within_managed_segment(layout, tree):
-            raise BootloaderError(f"current 指向 generations/ 之外的路径: {tree}")
+            raise ToolchainError(f"current 指向 generations/ 之外的路径: {tree}")
         version = tree.name
         if version_arg and version_arg != version:
-            raise BootloaderError(
+            raise ToolchainError(
                 f"--version {version_arg} 与 current 指向的 {version} 不一致；"
                 "版本切换由 install / runtime update 承载（boot 不做重指）"
             )
@@ -280,7 +279,7 @@ def _resolve_last_good_tree(layout: DistroLayout, boot: BootToml, distro: str) -
     if layout.last_good.is_symlink() or layout.last_good.exists():
         tree = layout.last_good.resolve()
         if not _within_managed_segment(layout, tree):
-            raise BootloaderError(f"last-good 指向 generations/ 之外的路径: {tree}")
+            raise ToolchainError(f"last-good 指向 generations/ 之外的路径: {tree}")
         return tree
     if boot.last_good and "/" in boot.last_good:
         lg_distro, lg_ver = boot.last_good.split("/", 1)
@@ -288,7 +287,7 @@ def _resolve_last_good_tree(layout: DistroLayout, boot: BootToml, distro: str) -
             tree = (layout.generations / lg_ver).resolve()
             if tree.is_dir():
                 return tree
-    raise BootloaderError(
+    raise ToolchainError(
         f"last-good 未设置或不可用: {layout.last_good} / boot.toml last_good={boot.last_good!r}"
     )
 
@@ -305,6 +304,7 @@ async def run_boot(
     yes: bool = False,
     webui_dev: bool = False,
     webui_dev_dir_arg: str | Path | None = None,
+    on_ready: Callable[[], None] | None = None,
 ) -> int:
     """引导并监督：物化数据盘 → spawn OS（+ 前端）→ 健康检查 → 运行至停止。
 
@@ -373,15 +373,31 @@ async def run_boot(
     stop = stop_event or asyncio.Event()
     loop = asyncio.get_running_loop()
     installed: list[signal.Signals] = []
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGHUP"):
+        signals.append(signal.SIGHUP)
+    for sig in signals:
         try:
             loop.add_signal_handler(sig, stop.set)
             installed.append(sig)
-        except (NotImplementedError, RuntimeError, ValueError):
+        except NotImplementedError, RuntimeError, ValueError:
             logger.debug("signal handler unavailable: %s", sig)
     _write_boot_pid(target.layout.root)
     try:
-        await stack.start()
+        starting = asyncio.create_task(stack.start())
+        stopping = asyncio.create_task(stop.wait())
+        try:
+            await asyncio.wait((starting, stopping), return_when=asyncio.FIRST_COMPLETED)
+            if stop.is_set() and not starting.done():
+                starting.cancel()
+                await asyncio.gather(starting, return_exceptions=True)
+                return 0
+            await starting
+        finally:
+            stopping.cancel()
+            await asyncio.gather(stopping, return_exceptions=True)
+        if on_ready is not None:
+            on_ready()
         try:
             _update_last_good(target)
         except Exception:
@@ -394,15 +410,21 @@ async def run_boot(
             if proc is not None and proc.poll() is not None:
                 logger.error("OS 子进程意外退出 (code=%s)，收束其余子进程", proc.returncode)
                 return 1
+            frontend = getattr(stack, "webui_process", None)
+            if frontend is not None and frontend.poll() is not None:
+                logger.error("前端子进程异常退出 (code=%s)，收束全栈", frontend.returncode)
+                return 1
             await asyncio.sleep(_SUPERVISOR_POLL_SECONDS)
     finally:
         for sig in installed:
             try:
                 loop.remove_signal_handler(sig)
-            except (NotImplementedError, RuntimeError, ValueError):
+            except NotImplementedError, RuntimeError, ValueError:
                 logger.debug("signal handler removal failed: %s", sig)
-        _clear_boot_pid(target.layout.root)
-        await asyncio.shield(stack.stop())
+        try:
+            await asyncio.shield(stack.stop())
+        finally:
+            _clear_boot_pid(target.layout.root)
 
 
 # ── 救援与 known-good ──────────────────────────────────
@@ -414,17 +436,17 @@ def _perform_snapshot_restore(target: BootTarget, *, yes: bool) -> None:
     with acquire_distro_lock(distro_root):
         snaps = snapshot.list_snapshots(target.layout, target.distro_toml)
         if not snaps:
-            raise BootloaderError("无快照可恢复（snapshots/ 为空）")
+            raise ToolchainError("无快照可恢复（snapshots/ 为空）")
         latest = snaps[-1]
         if not yes:
             if not sys.stdin.isatty():
-                raise BootloaderError("非交互环境：--restore-snapshot 需配合 --yes")
+                raise ToolchainError("非交互环境：--restore-snapshot 需配合 --yes")
             answer = input(
                 f"将恢复快照 {latest.name} 并重指 current 到 {target.version}；"
                 "快照之后的写入窗口将丢失。确认恢复？[y/N] "
             )
             if answer.strip().lower() not in ("y", "yes"):
-                raise BootloaderError("已取消快照恢复")
+                raise ToolchainError("已取消快照恢复")
         restored = snapshot.restore(target.layout, target.distro_toml, latest)
         logger.info("快照已恢复: %s（数据回到旧版本 %s 方向）", latest.name, restored or "未知")
     repoint_current(distro_root, target.version)
@@ -433,7 +455,7 @@ def _perform_snapshot_restore(target: BootTarget, *, yes: bool) -> None:
 
 def _update_last_good(target: BootTarget) -> None:
     """启动健康检查通过后：更新 ``last-good`` 符号链接 + ``boot.toml.last_good``。"""
-    from ghrah_bootloader.runtime_ref import repoint_last_good
+    from ghrah_toolchain.runtime_ref import repoint_last_good
 
     repoint_last_good(target.layout.root, target.version)
     boot = BootToml.load(target.layout.root.parent)
@@ -471,7 +493,7 @@ def stop_boot_session(
     try:
         pid = int(pidfile.read_text(encoding="utf-8").strip() or "0")
     except (OSError, ValueError) as e:
-        raise BootloaderError(f"boot pidfile 损坏: {pidfile}: {e}") from e
+        raise ToolchainError(f"boot pidfile 损坏: {pidfile}: {e}") from e
     if _session_exited(pid):
         with contextlib.suppress(OSError):
             pidfile.unlink()
@@ -502,7 +524,7 @@ def stop_boot_session(
 
 
 def _stop_guard(distro: str, pid: int) -> int | None:
-    """平台护栏：pid 是否仍属于 ghrah-bootloader 家族；拒绝时返回 rc=1。
+    """平台护栏：pid 是否仍属于 ghrah-toolchain 家族；拒绝时返回 rc=1。
 
     - POSIX：``/proc/<pid>/cmdline``（无 /proc 平台跳过并告警）；
     - Windows：进程映像名（OpenProcess + QueryFullProcessImageNameW），
@@ -519,14 +541,23 @@ def _stop_guard(distro: str, pid: int) -> int | None:
                 "跳过 cmdline 护栏，仅凭 pidfile 继续"
             )
             return None
-        if "ghrah-bootloader" not in cmdline and "ghrah_bootloader" not in cmdline:
+        words = cmdline.split()
+        scripts = {"ghrah", "ghrah-toolchain", "ghrah-bootloader"}
+        script_matches = any(Path(word).name in scripts for word in words[:2])
+        module_matches = any(
+            word == "-m"
+            and index + 1 < len(words)
+            and words[index + 1] in {"ghrah_toolchain", "ghrah_bootloader"}
+            for index, word in enumerate(words[:2])
+        )
+        if not script_matches and not module_matches:
             print(
-                f"[{distro}] 拒绝：pid {pid} 的 cmdline 不属于 ghrah-bootloader（{cmdline!r}）；"
+                f"[{distro}] 拒绝：pid {pid} 的 cmdline 不属于 ghrah-toolchain（{cmdline!r}）；"
                 "请人工核查后处理"
             )
             return 1
         return None
-    from ghrah_bootloader import winproc
+    from ghrah_toolchain import winproc
 
     image = winproc.process_image(pid)
     if image is None:
@@ -535,9 +566,12 @@ def _stop_guard(distro: str, pid: int) -> int | None:
         )
         return None
     base = image.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].lower()
-    if "ghrah-bootloader" not in base and "python" not in base:
+    if (
+        base not in {"ghrah.exe", "ghrah-toolchain.exe", "ghrah-bootloader.exe"}
+        and "python" not in base
+    ):
         print(
-            f"[{distro}] 拒绝：pid {pid} 的映像名不属于 ghrah-bootloader 家族"
+            f"[{distro}] 拒绝：pid {pid} 的映像名不属于 ghrah-toolchain 家族"
             f"（{image}）；请人工核查后处理"
         )
         return 1

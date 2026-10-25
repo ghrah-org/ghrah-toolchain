@@ -1,0 +1,250 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "integer",
+      "const": 1
+    },
+    "workspace": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "default_distro": {
+          "type": "string",
+          "minLength": 1
+        },
+        "native_locks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "components": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "distro": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$": {
+          "type": "object",
+          "properties": {
+            "components": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "roots": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "gate": {
+              "enum": [
+                "basic",
+                "full",
+                "data"
+              ]
+            },
+            "runtime": {
+              "type": "object",
+              "properties": {
+                "python": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "node": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "instances": {
+              "type": "object",
+              "patternProperties": {
+                "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$": {
+                  "type": "object",
+                  "properties": {
+                    "component": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "config": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "host": {
+                      "enum": [
+                        "process",
+                        "in-process",
+                        "container"
+                      ]
+                    },
+                    "host_entry": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "imports": {
+                      "type": "object",
+                      "patternProperties": {
+                        "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "component",
+                    "host"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "services": {
+              "type": "object",
+              "patternProperties": {
+                "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$": {
+                  "type": "object",
+                  "properties": {
+                    "scheme": {
+                      "const": "ability"
+                    },
+                    "contract": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "instance": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "export": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "scheme",
+                    "contract",
+                    "instance",
+                    "export"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "namespaces": {
+              "type": "object",
+              "patternProperties": {
+                "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$": {
+                  "type": "object",
+                  "properties": {
+                    "bindings": {
+                      "type": "object",
+                      "patternProperties": {
+                        "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "bindings"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "components",
+            "roots",
+            "instances"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "profile": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "dev",
+                "test",
+                "release"
+              ]
+            },
+            "locked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "workspace",
+    "components",
+    "distro"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

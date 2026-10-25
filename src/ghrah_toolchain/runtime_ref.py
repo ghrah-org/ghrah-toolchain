@@ -41,10 +41,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ghrah_bootloader import snapshot
-from ghrah_bootloader.build import build_artifacts, read_source_commit
-from ghrah_bootloader.errors import BootloaderError, GateError, RuntimeRefError
-from ghrah_bootloader.layout import (
+from ghrah_toolchain import snapshot
+from ghrah_toolchain.build import build_artifacts, read_source_commit
+from ghrah_toolchain.errors import GateError, RuntimeRefError, ToolchainError
+from ghrah_toolchain.layout import (
     BootToml,
     DistroLayout,
     DistroToml,
@@ -52,8 +52,8 @@ from ghrah_bootloader.layout import (
     list_distros,
     resolve_distro_root,
 )
-from ghrah_bootloader.lifecycle import DEFAULT_HOST, port_in_use
-from ghrah_bootloader.materialize import (
+from ghrah_toolchain.lifecycle import DEFAULT_HOST, port_in_use
+from ghrah_toolchain.materialize import (
     GenerationSpec,
     generation_complete,
     generation_dir,
@@ -86,7 +86,7 @@ def _pid_alive(pid: int) -> bool | None:
     if pid <= 0:
         return False
     if os.name == "nt":
-        from ghrah_bootloader import winproc
+        from ghrah_toolchain import winproc
 
         return winproc.pid_alive(pid)
     try:
@@ -102,7 +102,7 @@ def _lock_is_stale(path: Path, stale_after: float) -> bool:
     try:
         age = time.time() - path.stat().st_mtime
         pid = int(path.read_text(encoding="utf-8").strip() or "0")
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return True
     # 探测不可用（None）不判死——时间兜底（600s）仍在，探测失败不应
     # 让锁被误回收（与 pidfile 的 fail-closed 语义一致）
@@ -150,8 +150,8 @@ def _repoint_link(distro_root: Path, name: str, target: str) -> None:
     """
     link = distro_root / name
     if os.name == "nt":
-        from ghrah_bootloader import winproc
-        from ghrah_bootloader.errors import WinProcError
+        from ghrah_toolchain import winproc
+        from ghrah_toolchain.errors import WinProcError
 
         target_abs = (distro_root / "generations" / target).resolve()
         try:
@@ -321,7 +321,7 @@ class RuntimeRefManager:
         old = self._current_entry(d)
         if update and old is None:
             raise RuntimeRefError(
-                f"发行版 {d} 尚未安装（无 current）；请先 ghrah-bootloader install"
+                f"发行版 {d} 尚未安装（无 current）；请先 ghrah-toolchain install"
             )
         with acquire_distro_lock(distro_root):
             return self._ensure_locked(
@@ -570,7 +570,7 @@ class RuntimeRefManager:
         # 失败时 staging 清理、目标不存在——「失败 = 什么都没发生」。
         try:
             build_artifacts(repo, commit, out_dir=tree)
-        except BootloaderError as e:
+        except ToolchainError as e:
             raise RuntimeRefError(f"建版本树失败 {ver}: {e}") from e
         return tree
 
@@ -614,7 +614,7 @@ class RuntimeRefManager:
         """
         try:
             gen_rel = tree.relative_to(layout.generations.resolve())
-        except (ValueError, OSError):
+        except ValueError, OSError:
             gen_rel = None
         if gen_rel is not None and len(gen_rel.parts) == 1:
             return "generation", ""
@@ -637,7 +637,7 @@ class RuntimeRefManager:
             raise GateError(f"未知门禁级别: {level}（应为 basic | full | data）")
         try:
             self._gate_generation(gen_dir)
-        except BootloaderError as e:
+        except ToolchainError as e:
             raise GateError(f"门禁 basic 未通过（代冒烟失败）: {e}") from e
         return "passed"
 
