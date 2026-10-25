@@ -108,6 +108,45 @@ def test_shell_exits_without_orphaning_subject(installed: Path) -> None:
     assert not (installed / ".boot.pid").exists()
 
 
+def test_grouped_status_restart_and_log_follow(installed: Path, tmp_path: Path) -> None:
+    def cli(*args):
+        result = subprocess.run(
+            [sys.executable, "-m", "ghrah_toolchain", "distro", *args],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)["data"]
+
+    first = cli("start", "demo", "--json")
+    _until(lambda: instance_status("demo")["state"] == "running")
+    status = cli("status", "demo", "--json")
+    assert status["pid"] == first["pid"]
+    captured = tmp_path / "follow.txt"
+    with captured.open("w") as output:
+        follower = subprocess.Popen(
+            [sys.executable, "-m", "ghrah_toolchain", "distro", "logs", "demo", "--follow"],
+            stdout=output,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            _until(lambda: "subject-output-visible" in captured.read_text())
+            restarted = cli("restart", "demo", "--json")
+            assert restarted["pid"] != first["pid"]
+            _until(lambda: captured.read_text().count("subject-output-visible") >= 2)
+            _until(lambda: instance_status("demo")["state"] == "running")
+            follower.send_signal(signal.SIGINT)
+            _, error = follower.communicate(timeout=5)
+            assert follower.returncode == 0, error
+            assert instance_status("demo")["state"] == "running"
+        finally:
+            if follower.poll() is None:
+                follower.kill()
+                follower.communicate(timeout=5)
+
+
 def test_start_returns_before_health_and_can_stop_while_starting(installed: Path) -> None:
     server = installed / "current" / "env" / ".venv" / "bin" / "ghrah-subject-server"
     server.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")

@@ -36,7 +36,7 @@ from pathlib import Path
 
 from ghrah_toolchain import __version__
 from ghrah_toolchain.errors import BuildError
-from ghrah_toolchain.materialize import RUNTIME_PYTHON, pnpm_command
+from ghrah_toolchain.materialize import RUNTIME_PYTHON, pnpm_command, runtime_python
 
 logger = logging.getLogger(__name__)
 
@@ -187,12 +187,22 @@ def _build_into(repo: Path, sha: str, staging: Path) -> BuildResult:
     wheels_dir = staging / "wheels"
     tarballs_dir = staging / "tarballs"
     src = _archive_source(repo, sha, staging)
+    python_pin = src / ".python-version"
+    interpreter = runtime_python(
+        {
+            "python": {
+                "interpreter": python_pin.read_text(encoding="utf-8").strip()
+                if python_pin.is_file()
+                else RUNTIME_PYTHON
+            }
+        }
+    )
     wheel_files = _build_wheels(src, wheels_dir)
     pins_file = _export_pins(src, wheels_dir)
     tarball_entries = _build_webui(src, tarballs_dir, staging)
     _rmtree(src)  # 产物树不含源码 checkout（纯产物）
     _write_bootstrap(staging, sha)
-    _write_manifest(staging, sha, wheel_files, pins_file, tarball_entries)
+    _write_manifest(staging, sha, wheel_files, pins_file, tarball_entries, interpreter=interpreter)
     return BuildResult(
         out_dir=staging,
         source_commit=sha,
@@ -332,11 +342,14 @@ def _write_manifest(
     wheels: list[Path],
     pins_file: Path,
     tarballs: list[tuple[Path, str, str]],
+    *,
+    interpreter: str = "3.11",
 ) -> None:
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "source_commit": sha,
         "python": {
+            "interpreter": interpreter,
             "wheels": [
                 {
                     "name": _wheel_name(w.name),
@@ -411,7 +424,7 @@ def verify_artifacts(out_dir: Path) -> None:
         venv = Path(td) / "venv"
         win = os.name == "nt"
         py = venv / ("Scripts/python.exe" if win else "bin/python")
-        _run(["uv", "venv", "--python", RUNTIME_PYTHON, str(venv)])
+        _run(["uv", "venv", "--python", runtime_python(manifest), str(venv)])
         install = ["uv", "pip", "install", f"--python={py}"]
         install += [str(w) for w in sorted((out_dir / "wheels").glob("*.whl"))]
         install += ["-r", str(pins)]

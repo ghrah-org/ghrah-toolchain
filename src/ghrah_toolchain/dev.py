@@ -69,7 +69,12 @@ from ghrah_toolchain.layout import (
     resolve_data_root,
 )
 from ghrah_toolchain.lifecycle import DEFAULT_HOST, BootStack, StackConfig, port_in_use
-from ghrah_toolchain.materialize import _install_python_env, _uv_env, _venv_python
+from ghrah_toolchain.materialize import (
+    RUNTIME_PYTHON,
+    _install_python_env,
+    _uv_env,
+    _venv_python,
+)
 from ghrah_toolchain.runtime_ref import _pid_alive
 
 logger = logging.getLogger(__name__)
@@ -259,7 +264,10 @@ def _resolve_context(args: argparse.Namespace) -> DevContext:
     target = resolve_boot_target(args.distro, None)
     repo_path = target.distro_toml.repo_path
     if not repo_path:
-        raise ToolchainError("distro.toml 未配置源仓路径（[distro.repo].path）；dev 需要源仓工作树")
+        hint = "（实例使用远程来源，dev 需要本地工作树）" if target.distro_toml.repo_url else ""
+        raise ToolchainError(
+            "distro.toml 未配置源仓路径（[distro.repo].path）；dev 需要源仓工作树" + hint
+        )
     repo = Path(repo_path).expanduser()
     if not (repo / ".git").is_dir():
         raise ToolchainError(
@@ -337,7 +345,10 @@ def _materialize_dev(distro_root: Path, artifacts: Path, gen: Path) -> None:
     staging = gen.parent / f"{GEN}.tmp-{os.getpid()}"
     _rmtree(staging) if staging.exists() else None
     try:
-        _install_python_env(distro_root, artifacts, staging / "env" / ".venv")
+        # dev 产物树没有 manifest.json：解释器直接钉运行时下限版本。
+        _install_python_env(
+            distro_root, artifacts, staging / "env" / ".venv", python=RUNTIME_PYTHON
+        )
         if gen.exists():
             _rmtree(gen)
         gen.parent.mkdir(parents=True, exist_ok=True)

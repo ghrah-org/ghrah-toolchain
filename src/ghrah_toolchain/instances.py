@@ -121,6 +121,21 @@ def list_instances() -> list[dict[str, Any]]:
     return [instance_status(name) for name in list_distros()]
 
 
+def assert_instance_stopped(root: Path) -> None:
+    """调用者持有实例锁；覆盖尚未监听端口的启动／停止阶段。"""
+    record = _read(root)
+    if record and _process(record) is not None:
+        raise ToolchainError(f"[{root.name}] 监督进程仍在运行，请先 ghrah distro stop {root.name}")
+    pidfile = boot_pid_path(root)
+    if pidfile.exists():
+        try:
+            pid = int(pidfile.read_text().strip())
+        except (ValueError, OSError) as exc:
+            raise ToolchainError("旧 pidfile 损坏，无法确认实例已停止") from exc
+        if _pid_alive(pid) is not False:
+            raise ToolchainError(f"[{root.name}] 旧会话仍在运行，请先停止")
+
+
 def _transition(root: Path, token: str, state: str, error: str | None = None) -> None:
     with _locked(root):
         record = _read(root)
@@ -136,10 +151,10 @@ def start_instance(
     name: str, *, no_webui: bool = False, foreground: bool = False
 ) -> dict[str, Any] | int:
     """启动已安装具名实例；默认立即返回，监督者及输出脱离终端。"""
-    target = resolve_boot_target(name, None)
-    root = target.layout.root
+    root = resolve_distro_root(name)
     token = uuid.uuid4().hex
     with _locked(root):
+        target = resolve_boot_target(name, None)
         previous = _read(root)
         if previous and previous["state"] in _ACTIVE and _process(previous) is not None:
             return instance_status(name)
@@ -228,6 +243,8 @@ def serve_instance(name: str, token: str, *, no_webui: bool = False) -> int:
 
 def stop_instance(name: str, *, timeout: float = 15.0) -> int:
     """幂等停止具名实例，核对创建时间后向监督者发信号，等待整组收束。"""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ToolchainError("停止超时必须是有限正数")
     root = resolve_distro_root(name)
     if not root.is_dir():
         raise ToolchainError(f"实例未安装: {name}")
@@ -279,3 +296,44 @@ def read_logs(name: str, *, tail: int = 100) -> str:
             return "".join(deque(stream, maxlen=tail))
     except FileNotFoundError:
         return ""
+
+
+def follow_logs(name: str, *, tail: int = 100):
+    """从同一个文件句柄读末尾后跟随，轮转／新会话时切换；不控制实例生命周期。"""
+    from collections import deque
+
+    stream = None
+    identity = None
+    first = True
+    try:
+        while True:
+            status = instance_status(name)
+            path = Path(status["log"]) if status.get("log") else None
+            try:
+                stat = path.stat() if path else None
+            except FileNotFoundError:
+                stat = None
+            current = (path, stat.st_dev, stat.st_ino) if stat else None
+            if current is not None and (current != identity or stream is None):
+                if stream:
+                    remaining = stream.read()
+                    if remaining:
+                        yield remaining
+                    stream.close()
+                stream = path.open(encoding="utf-8", errors="replace")
+                identity = current
+                if first:
+                    recent = "".join(deque(stream, maxlen=tail))
+                    if recent:
+                        yield recent
+                    first = False
+            if stream:
+                if current == identity and stat.st_size < stream.tell():
+                    stream.seek(0)
+                chunk = stream.read()
+                if chunk:
+                    yield chunk
+            time.sleep(0.1)
+    finally:
+        if stream:
+            stream.close()

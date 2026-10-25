@@ -24,6 +24,7 @@ from ghrah_toolchain.materialize import (
     GENERATION_TOML,
     GenerationSpec,
     PluginRef,
+    _install_python_env,
     generation_complete,
     generation_dir,
     generation_fingerprint,
@@ -170,6 +171,7 @@ def test_m3_materialize_full_chain(tmp_path: Path, fake_procs) -> None:
     venv_cmd = [c for c in fake_procs.calls if c[0] == "uv" and "venv" in c]
     install_cmd = [c for c in fake_procs.calls if c[0] == "uv" and "install" in c]
     assert venv_cmd and install_cmd
+    assert venv_cmd[0][venv_cmd[0].index("--python") + 1] == "3.11"
     flat = install_cmd[0]
     assert any(p.endswith(".whl") for p in flat)
     assert "-r" in flat and any(p.endswith("pins.txt") for p in flat)
@@ -196,6 +198,28 @@ def test_m3_materialize_full_chain(tmp_path: Path, fake_procs) -> None:
         "store-dir" in part and "cache" in part for c in pnpm_cmds for part in c
     )
     assert (gen / "env" / "node" / "node_modules").is_dir()
+
+
+def test_materialization_uses_artifact_python_pin(tmp_path: Path, fake_procs) -> None:
+    base = tmp_path / "base"
+    _materialize_base(base)
+    path = base / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["python"]["interpreter"] = "3.14.8"
+    path.write_text(json.dumps(manifest))
+    materialize_generation(tmp_path / "demo", base, _spec())
+    command = next(cmd for cmd in fake_procs.calls if "venv" in cmd)
+    assert command[command.index("--python") + 1] == "3.14.8"
+
+
+def test_explicit_python_does_not_require_base_manifest(tmp_path: Path, fake_procs) -> None:
+    """dev 产物树没有 manifest.json；显式 python 必须优先于清单读取。"""
+    base = tmp_path / "artifacts"
+    _materialize_base(base)
+    (base / "manifest.json").unlink()
+    _install_python_env(tmp_path / "demo", base, tmp_path / "venv", python="3.12")
+    command = next(cmd for cmd in fake_procs.calls if "venv" in cmd)
+    assert command[command.index("--python") + 1] == "3.12"
 
 
 # ── M3b 复用（零物化）与重建 ─────────────────────────────────

@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tomllib
@@ -330,12 +331,25 @@ def _uv_env(distro_root: Path) -> dict[str, str]:
     return {**os.environ, "UV_CACHE_DIR": str(distro_root / _CACHE_SUBDIR_UV)}
 
 
-def _install_python_env(distro_root: Path, base_tree: Path, venv: Path) -> None:
+def runtime_python(manifest: dict) -> str:
+    """运行时解释器来自构建产物；旧版 ghrah 产物沿用 ``RUNTIME_PYTHON`` 基线。"""
+    request = manifest.get("python", {}).get("interpreter", RUNTIME_PYTHON)
+    if not isinstance(request, str) or re.fullmatch(r"3\.\d+(?:\.\d+)?", request) is None:
+        raise MaterializeError("产物 python.interpreter 必须是明确的 Python 3 数字版本")
+    return request
+
+
+def _install_python_env(
+    distro_root: Path, base_tree: Path, venv: Path, *, python: str | None = None
+) -> None:
     """``uv venv`` + ``uv pip install`` 基座 wheels + pins 平铺（安装期零解析）。
 
     ``--relocatable``：代目录经 staging + ``os.replace`` 改名落位——绝对路径
     shebang 会钉死 staging 名（改名后入口全部失效）；relocatable 形态的入口
     脚本为自定位 wrapper（``#!/bin/sh`` + 相对解析），改名后照常执行。
+
+    ``python`` 显式指定解释器时优先使用；dev 的产物树没有 manifest.json，
+    由调用者直接传入 ``RUNTIME_PYTHON``。
     """
     wheels = sorted((base_tree / "wheels").glob("*.whl"))
     if not wheels:
@@ -343,9 +357,9 @@ def _install_python_env(distro_root: Path, base_tree: Path, venv: Path) -> None:
     pins = base_tree / "wheels" / "pins.txt"
     if not pins.is_file():
         raise MaterializeError(f"基座产物树无 pins.txt: {base_tree}")
-    # 代内 Python 钉死为运行时下限版本：见 RUNTIME_PYTHON 注释（wheel 覆盖优先于版本新）。
+    request = python or runtime_python(_read_base_manifest(base_tree))
     _run(
-        ["uv", "venv", "--relocatable", "--python", RUNTIME_PYTHON, str(venv)],
+        ["uv", "venv", "--relocatable", "--python", request, str(venv)],
         env=_uv_env(distro_root),
     )
     py = _venv_python(venv)
@@ -361,7 +375,7 @@ def _install_webui_env(distro_root: Path, base_tree: Path, manifest: dict, node_
     observer-web 的依赖声明是 ``workspace:*`` 协议——脱离 monorepo workspace
     经 ``file:`` 消费时 pnpm 无法解析（实测 ERR_PNPM_WORKSPACE_PKG_NOT_FOUND）。
     故 shim 只声明对 observer-web 的直接 ``file:`` 依赖，其余 @ghrah/* 经
-    ``pnpm.overrides`` 重写到基座 tarball（相对路径以 shim 目录解析；tarball
+    ``pnpm-workspace.yaml`` 的 overrides 重写到基座 tarball（相对路径以 shim 目录解析；tarball
     文件名从基座 manifest 权威读取——文件名解析不可靠）。第三方
     依赖由 pnpm 现场解析并以生成的 pnpm-lock.yaml 固化在代内（同代复用零
     解析；漂移窗口仅换代时）。

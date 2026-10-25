@@ -35,6 +35,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -101,12 +102,16 @@ def _pid_alive(pid: int) -> bool | None:
 def _lock_is_stale(path: Path, stale_after: float) -> bool:
     try:
         age = time.time() - path.stat().st_mtime
-        pid = int(path.read_text(encoding="utf-8").strip() or "0")
-    except OSError, ValueError:
+        pid = int(path.read_text(encoding="utf-8").strip())
+    except FileNotFoundError:
         return True
+    except OSError, ValueError:
+        # 刚创建的锁可能尚未写入 PID，不能在该竞窗抢走它。
+        return path.exists() and time.time() - path.stat().st_mtime > stale_after
     # 探测不可用（None）不判死——时间兜底（600s）仍在，探测失败不应
     # 让锁被误回收（与 pidfile 的 fail-closed 语义一致）
-    return age > stale_after or _pid_alive(pid) is False
+    alive = _pid_alive(pid)
+    return alive is False or (alive is None and age > stale_after)
 
 
 @contextlib.contextmanager
@@ -309,33 +314,51 @@ class RuntimeRefManager:
         source: str | RefSource | None = None,
         version: str | None = None,
         gate: str = "basic",
+        initial_config: str | None = None,
     ) -> BootEntry:
         """安装/切换到候选 commit 并重指 ``current``（全程持锁）。"""
+        if gate != "basic":
+            raise GateError("目前只支持 basic 门禁，full/data 尚未实现")
+        if version and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", version) is None:
+            raise RuntimeRefError(f"非法版本名: {version!r}")
+        # 实例锁覆盖构建与切换，安装域锁只覆盖共享引导菜单的提交。
         boot_before = BootToml.load(self._root)
         d = distro or (boot_before.default.split("/", 1)[0] if boot_before.default else "")
         if not d:
             raise RuntimeRefError("未指定发行版：提供 --distro 或在 boot.toml 设置 default")
-        distro_root = resolve_distro_root(d, self._root)  # 校验发行版名
-        distro_toml = DistroToml.load(distro_root)
-        self._guard_not_running(distro_toml)
-        old = self._current_entry(d)
-        if update and old is None:
-            raise RuntimeRefError(
-                f"发行版 {d} 尚未安装（无 current）；请先 ghrah-toolchain install"
-            )
+        distro_root = resolve_distro_root(d, self._root)
         with acquire_distro_lock(distro_root):
-            return self._ensure_locked(
-                d,
-                distro_root,
-                distro_toml,
-                boot_before,
-                old,
-                update=update,
-                fetch=fetch,
-                source=source,
-                version=version,
-                gate=gate,
-            )
+            from ghrah_toolchain.instances import assert_instance_stopped
+            from ghrah_toolchain.toml_io import atomic_write
+
+            assert_instance_stopped(distro_root)
+            path = distro_root / "distro.toml"
+            created_config = initial_config is not None and not path.exists()
+            if created_config:
+                atomic_write(path, initial_config)
+            try:
+                distro_toml = DistroToml.load(distro_root)
+                self._guard_not_running(distro_toml)
+                old = self._current_entry(d)
+                if update and old is None:
+                    raise RuntimeRefError(f"发行版 {d} 尚未安装；请先 ghrah distro install")
+                logger.info("[%s] 解析来源，准备构建／复用产物与运行环境", d)
+                return self._ensure_locked(
+                    d,
+                    distro_root,
+                    distro_toml,
+                    boot_before,
+                    old,
+                    update=update,
+                    fetch=fetch,
+                    source=source,
+                    version=version,
+                    gate=gate,
+                )
+            except Exception:
+                if created_config and not (distro_root / "current").exists():
+                    path.unlink(missing_ok=True)
+                raise
 
     def _ensure_locked(
         self,
@@ -366,6 +389,7 @@ class RuntimeRefManager:
             tree = distro_root / "versions" / ver
             created = not reused
             if created:
+                logger.info("[%s] 构建基座产物 %s", distro, ver)
                 self._create_version_tree(distro, ver, commit, repo)
 
         return self._ensure_generation_locked(
@@ -405,6 +429,7 @@ class RuntimeRefManager:
         gen_created = not gen_dir.exists()
         try:
             if gen_created:
+                logger.info("[%s] 准备组合代环境 %s", distro, gen)
                 materialize_generation(distro_root, tree, spec)
             new_entry = BootEntry(
                 distro=distro,
@@ -414,34 +439,49 @@ class RuntimeRefManager:
                 kind="generation",
                 base_version=ver,
             )
+            logger.info("[%s] 检查 %s 门禁", distro, gate)
             self._gate(gen_dir, gate)
         except Exception:
             self._cleanup_generation(gen_created, gen_dir)
             self._cleanup_tree(base_created, tree)
             raise
         try:
+            if old is not None and old.path == new_entry.path:
+                self._sync(distro, gen)
+                logger.info("[%s] 已是所选组合代，无需切换", distro)
+                return new_entry
             if old is not None:
+                logger.info("[%s] 保存更新前的数据快照", distro)
                 self._snapshot(distro_root, DistroToml.load(distro_root), old, new_entry, src, gate)
         except Exception:
             self._cleanup_generation(gen_created, gen_dir)
             self._cleanup_tree(base_created, tree)
             raise
-        try:
-            repoint_current(distro_root, gen)
-            self._sync(distro, gen)
-            self._write_boot_toml(boot_before, old, new_entry)
-            if old is None:
-                repoint_last_good(distro_root, gen)
-        except Exception as e:
-            logger.error("切换失败，开始回退: %s", e)
+        from ghrah_toolchain.instances import _locked
+
+        with _locked(self._root):
+            boot_before = BootToml.load(self._root)
             try:
-                self._rollback(distro, old, boot_before)
-            except Exception:
-                logger.error("回退失败（人工介入检查 current/boot.toml）", exc_info=True)
-            self._cleanup_generation(gen_created, gen_dir)
-            self._cleanup_tree(base_created, tree)
-            target = old.label if old is not None else "（无版本）"
-            raise RuntimeRefError(f"切换到 {new_entry.label} 失败，已回退至 {target}: {e}") from e
+                repoint_current(distro_root, gen)
+                self._sync(distro, gen)
+                self._write_boot_toml(boot_before, old, new_entry)
+                if old is None:
+                    repoint_last_good(distro_root, gen)
+            except Exception as e:
+                logger.error("切换失败，开始回退: %s", e)
+                try:
+                    self._rollback(distro, old, boot_before)
+                except Exception as rollback_error:
+                    raise RuntimeRefError(
+                        f"切换失败且回退未完成，请检查 current/boot.toml；"
+                        f"保留候选供恢复: {e}; {rollback_error}"
+                    ) from rollback_error
+                self._cleanup_generation(gen_created, gen_dir)
+                self._cleanup_tree(base_created, tree)
+                target = old.label if old is not None else "（无版本）"
+                raise RuntimeRefError(
+                    f"切换到 {new_entry.label} 失败，已回退至 {target}: {e}"
+                ) from e
         self._log_change(old, new_entry, src, gate)
         return new_entry
 
@@ -485,7 +525,7 @@ class RuntimeRefManager:
         if fetch:
             cp = self._run(["git", "-C", str(repo), "fetch", "--all"], check=False)
             if cp.returncode != 0:
-                logger.warning("git fetch 失败（按本地可见 ref 继续）: %s", cp.stderr.strip())
+                raise RuntimeRefError(f"git fetch 失败，未切换版本: {cp.stderr.strip()}")
         if source.kind == "latest":
             # 注解标签的 %(objectname) 是 tag 对象，须 peel 成 commit
             out = self._run(
@@ -764,7 +804,7 @@ class RuntimeRefManager:
         if port_in_use(DEFAULT_HOST, distro_toml.subject_port):
             raise RuntimeRefError(
                 f"端口 {distro_toml.subject_port} 被占用（OS 运行中？）——"
-                "冷切换要求先停止运行中的实例（boot 终端 Ctrl-C）"
+                "冷切换要求先执行 ghrah distro stop NAME"
             )
 
     # ── 子进程统一入口（便于测试 monkeypatch） ──

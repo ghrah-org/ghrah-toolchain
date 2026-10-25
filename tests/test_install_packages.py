@@ -453,19 +453,6 @@ def test_p10_switch_failure_rolls_back_to_old_generation(
     first = mgr.ensure(distro="generic", gate="basic")
     second_commit = _commit(repo, "b", "2026-09-20T10:00:00 +0000")
 
-    real_repoint = __import__(
-        "ghrah_toolchain.runtime_ref", fromlist=["repoint_current"]
-    ).repoint_current
-    state = {"failed": False}
-
-    def failing_repoint_after_first(distro_root, ver, *, segment=None):
-        if not state["failed"] and ver != first.version:
-            # 让「写 boot.toml」失败更直接：改用 _write_boot_toml 注入
-            pass
-        return real_repoint(distro_root, ver, segment=segment)
-
-    monkeypatch.setattr("ghrah_toolchain.runtime_ref.repoint_current", failing_repoint_after_first)
-
     def failing_write_boot(boot_before, old, new):
         raise RuntimeError("boot.toml 写入模拟失败")
 

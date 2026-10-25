@@ -13,7 +13,12 @@ description = "ghrah 开发、分发、配置与实例管理工具链"
 readme = "README.md"
 requires-python = ">=3.15.1"
 # 工具链允许显式声明第三方依赖，但保持与 ghrah 运行时业务包解耦。
-dependencies = ["jsonschema>=4.26", "packaging>=26.3", "psutil>=7.2"]
+dependencies = [
+    "jsonschema>=4.26",
+    "packaging>=26.3",
+    "psutil>=7.2",
+    "tomlkit>=0.15",
+]
 
 [project.scripts]
 ghrah = "ghrah_toolchain.cli:main"

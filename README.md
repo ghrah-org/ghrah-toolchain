@@ -1,8 +1,9 @@
 # ghrah-toolchain
 
-ghrah 的独立工具链，提供源码组合的离线校验、发行物构建和安装，以及具名实例的后台启停与日志查询。工具链不加载 Core／Subject 业务包；运行时从已安装发行版的环境中启动。
+九夏/ghrah 的独立工具链cli，提供安装与配置、源码组合的离线校验、构建，以及实例的后台启停与日志查询。
 
-需要 Python **3.15.1 或更新版本**。开发与构建使用 uv；涉及前端构建时还需要 pnpm 和 Node ≥22。工具链自身的 Python 版本与被部署发行版的 Python 环境分别管理。
+需要 Python **3.15.1 或更新版本**。推荐使用使用 uv 进行开发与构建；前端构建时还需要 pnpm 和 Node ≥22。工具链自身的 Python 版本与被部署发行版的 Python 环境分别管理。
+
 
 ## 安装与开发
 
@@ -40,19 +41,26 @@ ghrah check --manifest-path /path/to/ghrah-monorepo/ghrah.toml --json
 
 当前组件来源仅支持本地 path。metadata 是静态视图：不会启动组件、创建 Agent 授权或证明外部服务已经可用。构建／安装链目前继续使用已有产物流程，尚未改为由 ghrah.toml 驱动。
 
-## 创建、启动和停止具名实例
+## 安装、启动和管理发行版实例
 
 首次安装仍需要明确的运行时源码仓与提交：
 
 ```sh
-ghrah create generic --repo /path/to/ghrah-monorepo --ref commit:COMMIT
-ghrah start generic
-ghrah list
-ghrah logs generic --tail 100
-ghrah stop generic
+ghrah distro install generic --repo /path/to/ghrah-monorepo --ref commit:COMMIT
+ghrah distro start generic
+ghrah distro status generic
+ghrah distro list
+ghrah distro logs generic --tail 100
+ghrah distro stop generic
 ```
 
-create 与 install 使用同一安装流程，创建实例后不自动启动。已有安装域继续位于 ~/.ghrah，数据、组合代、快照与 last-good 保留兼容。可用 GHRAH_HOME 显式指定隔离安装域。
+create 与 install 使用同一安装流程，创建实例后不自动启动。安装的位置位于 ~/.ghrah。可用 GHRAH_HOME 显式指定安装路径。
+
+`--repo`（也可写 `--from`）目前只接收本地 Git 源仓路径，安装会按选定提交构建并准备运行环境；尚不提供远程 URL、registry 或归档安装器。可指定 `--subject-port` 与 `--webui-port`，便于多实例并行。构建、环境准备与试运行阶段会输出进度；首次安装失败会清除本次生成的实例声明，成功后才报告已安装。
+
+构建产物的 `manifest.json` 记录源提交 `.python-version` 中的运行时数字版本，安装和产物验证据此选择解释器，不继承工具链的 Python 3.15。没有版本声明的旧式 ghrah 来源／产物暂沿用 3.11 基线；此兼容规则只服务现有 ghrah 构建链，后续通用组件需要显式运行时契约。所需解释器由 uv 查找或安装。
+
+已有的短命令 `install/create`、`start/boot`、`stop`、`restart`、`status`、`list/ps`、`logs`、`config` 与规范 `distro` 分组使用同一处理函数。运行实例与当前源码工作区分开，cwd 不改变被管理的实例。
 
 **start 默认立即返回。** 返回 starting 表示已提交后台启动，不代表健康检查已通过。后台监督进程脱离终端，接管 Subject 和静态前端；关闭启动 shell 不会终止监督关系。通过 list 查看 running／failed，通过 logs 查看启动及运行输出。重复 start 不会再起一份监督者，重复 stop 返回成功。
 
@@ -60,17 +68,72 @@ create 与 install 使用同一安装流程，创建实例后不自动启动。�
 ghrah start generic --json
 ghrah ps --json
 ghrah start generic --foreground
+ghrah distro restart generic
+ghrah distro default generic
 ```
 
 --foreground 显式占用当前终端，适合诊断。默认不自动打开浏览器。boot 保留为 start 的迁移别名，也采用后台语义；救援或前端开发模式须显式加 --foreground，避免无意执行交互操作。
 
+`status` 分开显示安装代、监督进程状态和配置地址，不会因读取状态而 fetch、构建或启动；`running` 表示启动健康检查曾通过，当前健康不会被自动重新探测。`default` 显式选择默认已安装实例，省略名称时使用该设置，不读取源码清单的 default_distro。
+
 每次后台启动创建独立日志，位于 <安装域>/<实例>/logs/；Subject 输出和监督者错误均写入其中。当前尚未自动轮转日志。正常 stop 会收束子进程后再报告停止；POSIX 支持启动中取消和 SIGHUP 收束。监督者被 SIGKILL 等不可捕获方式杀死时的内核级子进程兜底尚未实现，Windows 分支尚未真机验收。
+
+```sh
+ghrah distro logs generic --follow
+```
+
+日志跟随会切换到重新启动后的新会话；Ctrl+C 只退出读取，实例继续运行。跟随器也能识别文件替换及已观察到的截断，但工具链尚未实现写入端的自动轮转。
+
+## 更新已安装实例
+
+```sh
+ghrah distro update generic --check --json
+ghrah distro stop generic
+ghrah distro update generic
+ghrah distro start generic
+```
+
+`--check` 只比较源仓本地可见的提交，不 fetch、不构建、不拍快照、不切换；不能同时使用 `--fetch`。执行更新时可显式 `--fetch`，失败立即终止，不把旧的本地结果当成远端最新结果。`--source commit:COMMIT`（或 `--ref`）只覆盖本次候选；长期跟踪来源通过下节配置修改。
+
+更新要求实例完全停止，包括尚未监听端口的 starting 阶段。普通更新保存已有数据，沿用门禁→快照→切换 current 的流程，不自动重启，不恢复旧数据。相同组合代不重复切换或拍快照。切换失败尝试回退；回退本身失败会明确报告并保留恢复产物。运行中的其他实例不因本实例构建而被停止。
+
+full／data 门禁仍未实现，选择它们会在构建前失败。数据快照恢复会丢弃快照之后的写入，仅通过显式救援参数及确认执行；普通 start/update 不进行数据恢复。独立的 `distro rollback/uninstall` 命令尚未提供。
+
+## 配置实例与 CLI
+
+实例配置保存在 `<GHRAH_HOME>/<实例>/distro.toml`；CLI 偏好保存在 `<GHRAH_HOME>/config.toml`，缺省根为 `~/.ghrah`。业务模型、Project 和 Agent 设置仍由运行时自己的 API／UI 管理。
+
+```sh
+ghrah distro config show generic
+ghrah distro config get generic runtime.subject_port --json
+ghrah distro stop generic
+ghrah distro config set generic runtime.subject_port 4222
+ghrah distro config set generic distro.ref.source branch:main
+ghrah distro config set generic distro.ref.fetch_on_update true
+ghrah self status
+ghrah self config set self.log_tail 200
+ghrah self config set self.output json
+ghrah self config show
+```
+
+| 实例可写键 | 类型与含义 |
+| --- | --- |
+| runtime.subject_port／runtime.webui_port | 1–65535 整数，两端口不能相同，下次启动生效 |
+| distro.ref.source | latest／branch:NAME／commit:SHA；后续安装更新的候选来源 |
+| distro.ref.gate | 当前只可写 basic |
+| distro.ref.fetch_on_update | true／false，执行更新时的默认 fetch 行为 |
+| data.root | 绝对路径或 ~ 路径，空字符串使用默认数据盘；只允许无已有数据时设置到空目标 |
+| data.snapshot_keep | 0–10000 整数，更新时保留的快照数量；0 表示不保留 |
+
+`get/show` 显示有效值、来源和生效时机，只展示支持的配置，不回显未知人工字段。`set` 要求实例停止，检查类型和范围、保留注释和无关内容，并保存上一份 `<文件>.bak` 后原子替换。检测到外部并发编辑则拒绝覆盖；已有数据根迁移和数据认领必须单独处理，不能通过改路径静默完成。
+
+CLI 首轮支持 `self.output = text/json`（支持 JSON 的命令默认输出格式）与 `self.log_tail = 0..10000`（日志默认尾行数）。显式 `--json/--tail` 优先；配置命令本身使用显式输出参数，以便修复已有偏好。self status 显示工具版本、解释器及安装路径，self doctor／doctor 检查安装域。CLI 自我更新尚未实施。
 
 ## 本地开发快环（dev）
 
 dev 从**工作树**（含未提交改动）增量构建并本地起服，用于改完代码立刻看到效果。它只读写 `<安装域>/<实例>/.dev/`，不重指 `current`，也不改变 `install`／`runtime`／`start` 的既有行为。
 
-前置：该实例已安装并重指过 `current`（`create`／`install` 的产物），且 `distro.toml` 的 `[distro.repo].path` 指向有效的源码仓工作树。
+前置：该实例已安装并重指过 `current`（`install`／`create` 的产物），且 `distro.toml` 的 `[distro.repo].path` 指向有效的源码仓工作树。远程 `url` 来源的实例没有本地工作树，dev 无法使用；请改用本地路径安装，或另建一个以本地检出为来源的实例。
 
 ```sh
 ghrah dev status            # 对比工作树与上次 dev 构建，报「全量 / 增量（哪些包）」+ 会话状态
@@ -106,15 +169,14 @@ dev 与发布态共用端口：起服前若存在 boot 会话会先停止它，�
 
 调试时把 `-v`／`--verbose` 放在子命令之前（`ghrah -v dev run`）。Windows 上运行中的 Python 持有 `.pyd`／`.pyc` 文件锁，因此「停旧 → 装 → 起新」的顺序不可颠倒；构建阶段可以让旧服继续跑。
 
-## 现有产物与安装功能
+## 源码构建与诊断
 
 ```sh
 ghrah build --repo /path/to/ghrah-monorepo --ref commit:COMMIT --out /path/to/output
-ghrah runtime update --distro generic --source commit:COMMIT
-ghrah doctor
+ghrah self doctor
 ```
 
-安装切换沿用原有门禁、快照、current 与 last-good 机制。full／data 门禁仍未实现，调用会明确失败。恢复数据快照会丢弃快照之后的写入，需通过显式救援参数确认；普通 start 不进行数据恢复。
+原 `runtime update/status` 仍保留兼容；新用法优先采用 distro 分组。dev 热重载、源码脚手架与通用 package 工作流属于后续迭代。
 
 ## 验证
 

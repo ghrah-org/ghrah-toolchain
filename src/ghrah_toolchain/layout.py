@@ -14,7 +14,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +61,11 @@ class BootToml:
             data = tomllib.loads(path.read_text(encoding="utf-8"))
         except tomllib.TOMLDecodeError as e:
             raise LayoutError(f"boot.toml 解析失败: {path}: {e}") from e
+        if any(
+            data.get(key) is not None and not isinstance(data[key], str)
+            for key in ("default", "fallback", "last_good")
+        ):
+            raise LayoutError(f"boot.toml 引导项必须是字符串: {path}")
         return cls(
             default=data.get("default"),
             fallback=data.get("fallback"),
@@ -66,26 +73,19 @@ class BootToml:
         )
 
     def save(self, root: Path | None = None) -> None:
-        """手写三键 TOML + 原子写（tmp + ``os.replace``；不引入 TOML writer 依赖）。"""
+        """保留人工注释与无关键；调用者负责跨实例写入的安装域锁。"""
+        from ghrah_toolchain.toml_io import edit_toml
+
         base = root or ghrah_root()
-        base.mkdir(parents=True, exist_ok=True)
-        lines = [
-            "# ghrah-toolchain 引导菜单（GPT）；由 ghrah-toolchain 维护",
-        ]
-        for key in ("default", "fallback", "last_good"):
-            value = getattr(self, key)
-            if value is not None:
-                lines.append(f"{key} = {_toml_str(value)}")
-        content = "\n".join(lines) + "\n"
-        tmp = base / f".boot.toml.tmp-{os.getpid()}"
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, base / "boot.toml")
+        edit_toml(
+            base / "boot.toml",
+            {key: getattr(self, key) for key in ("default", "fallback", "last_good")},
+        )
 
 
 def _toml_str(value: str) -> str:
-    """最小 TOML 基本字符串转义（反斜杠 + 双引号）。"""
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    """生成模板使用的带引号字符串，包括换行和控制字符转义。"""
+    return json.dumps(value, ensure_ascii=True)
 
 
 @dataclass
@@ -119,11 +119,39 @@ class DistroToml:
         except tomllib.TOMLDecodeError as e:
             raise LayoutError(f"distro.toml 解析失败: {path}: {e}") from e
         distro = data.get("distro", {})
+        for key in ("distro", "runtime", "data"):
+            if not isinstance(data.get(key, {}), dict):
+                raise LayoutError(f"{path}: {key} 必须是 table")
+        for key in ("repo", "ref", "plugins"):
+            if not isinstance(distro.get(key, {}), dict):
+                raise LayoutError(f"{path}: distro.{key} 必须是 table")
         repo = distro.get("repo", {})
         ref = distro.get("ref", {})
         plugins = distro.get("plugins", {})
         runtime = data.get("runtime", {})
         data_section = data.get("data", {})
+        for section, key, default in (
+            (runtime, "subject_port", 4112),
+            (runtime, "webui_port", 5173),
+            (data_section, "snapshot_keep", 3),
+        ):
+            if type(section.get(key, default)) is not int:
+                raise LayoutError(f"{path}: {key} 必须是整数")
+        if type(ref.get("fetch_on_update", False)) is not bool:
+            raise LayoutError(f"{path}: fetch_on_update 必须是布尔值")
+        for section, key, default in (
+            (distro, "name", ""),
+            (distro, "scenario", ""),
+            (repo, "path", ""),
+            (ref, "source", "latest"),
+            (ref, "gate", "basic"),
+            (data_section, "root", ""),
+        ):
+            if not isinstance(section.get(key, default), str):
+                raise LayoutError(f"{path}: {key} 必须是字符串")
+        enabled = plugins.get("enabled", [])
+        if not isinstance(enabled, list) or not all(isinstance(item, str) for item in enabled):
+            raise LayoutError(f"{path}: enabled 必须是字符串数组")
         install_mode = distro.get("install_mode")
         if install_mode is not None:
             if str(install_mode) == _RETIRED_INSTALL_MODE:
@@ -211,9 +239,13 @@ def list_distros(root: Path | None = None) -> list[str]:
 
 def resolve_distro_root(distro: str, root: Path | None = None) -> Path:
     """发行版根目录路径。"""
-    if not distro or "/" in distro or distro.startswith("."):
+    if not distro or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", distro) is None:
         raise LayoutError(f"非法发行版名: {distro!r}")
-    return (root or ghrah_root()) / distro
+    base = root or ghrah_root()
+    target = base / distro
+    if not target.resolve().is_relative_to(base.resolve()):
+        raise LayoutError(f"发行版目录越出安装域: {target}")
+    return target
 
 
 # ── 数据面路径（自 boot.py 迁入） ────────────────────────────

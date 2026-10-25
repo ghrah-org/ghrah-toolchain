@@ -185,6 +185,15 @@ def _manifest(out: Path) -> dict:
 
 
 class TestBuildArtifacts:
+    def test_runtime_python_pin_is_recorded(self, fake_repo: Path, tmp_path: Path) -> None:
+        _require("pnpm")
+        (fake_repo / ".python-version").write_text("3.14.8\n")
+        _git(fake_repo, "add", ".python-version")
+        _git(fake_repo, "commit", "-qm", "runtime python")
+        out = tmp_path / "out"
+        _build(fake_repo, out)
+        assert _manifest(out)["python"]["interpreter"] == "3.14.8"
+
     def test_u1_artifact_tree_complete(self, fake_repo: Path, tmp_path: Path) -> None:
         _require("pnpm")
         out = tmp_path / "out"

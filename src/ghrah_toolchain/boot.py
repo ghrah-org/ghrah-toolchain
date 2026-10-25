@@ -455,12 +455,14 @@ def _perform_snapshot_restore(target: BootTarget, *, yes: bool) -> None:
 
 def _update_last_good(target: BootTarget) -> None:
     """启动健康检查通过后：更新 ``last-good`` 符号链接 + ``boot.toml.last_good``。"""
+    from ghrah_toolchain.instances import _locked
     from ghrah_toolchain.runtime_ref import repoint_last_good
 
     repoint_last_good(target.layout.root, target.version)
-    boot = BootToml.load(target.layout.root.parent)
-    boot.last_good = target.label
-    boot.save(target.layout.root.parent)
+    with _locked(target.layout.root.parent):
+        boot = BootToml.load(target.layout.root.parent)
+        boot.last_good = target.label
+        boot.save(target.layout.root.parent)
 
 
 def stop_boot_session(
