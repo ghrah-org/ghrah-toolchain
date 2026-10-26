@@ -68,9 +68,21 @@ ghrah dev status            # 对比工作树与上次 dev 构建，报「全量
 ghrah dev up                # 构建 + 物化 dev venv + 接管端口前台起服
 ghrah dev up --no-restart   # 只构建／升级，不起服
 ghrah dev up --full         # 忽略指纹强制全量重建
+ghrah dev up --no-browser   # 起服但不自动打开浏览器
 ghrah dev down              # 停止 dev 会话（收束整棵进程树）
 ghrah dev reset             # 清空 .dev（含产物），下次必然全量
 ```
+
+`dev up` 是**前台**命令：起服后在当前终端持续监督，直到 Ctrl-C（或在另一终端执行 `ghrah dev down`）。就绪后控制台会打印访问地址：
+
+```text
+[dev] ===== dev 环境已就绪 =====
+[dev]   前端页面  http://localhost:5173
+[dev]   后端接口  http://127.0.0.1:4112（/health、ws ws://127.0.0.1:4112/ws）
+[dev]   运行日志  <安装域>/<实例>/.dev/dev.log
+```
+
+浏览器默认自动打开同 `start`；要关掉用 `--no-browser`。Subject 与前端子进程的输出直接继承当前终端（含 uvicorn 的就绪行与请求日志），监督侧的 INFO 记录另写入 `.dev/dev.log`。
 
 增量维度是「包」：五个 Python wheel 各算一个指纹单元，依赖闭包（`pyproject.toml`／`uv.lock`／`pnpm-lock.yaml`／`pnpm-workspace.yaml`）与 webui 各算一个。只改某个 Python 包时仅重编该 wheel 并强制重装进 dev venv；依赖或 webui 变动走全量重建。首次必然全量（含 pnpm 打包，约几分钟）。
 
