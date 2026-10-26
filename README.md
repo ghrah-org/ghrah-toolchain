@@ -74,17 +74,20 @@ dev 从**工作树**（含未提交改动）增量构建并本地起服，用于
 
 ```sh
 ghrah dev status            # 对比工作树与上次 dev 构建，报「全量 / 增量（哪些包）」+ 会话状态
-ghrah dev up                # 构建后前台起服；已在跑则先停、回收端口，再重启
-ghrah dev up --no-restart   # 只构建／升级，不起服
-ghrah dev up --full         # 忽略指纹强制全量重建
-ghrah dev up --no-browser   # 起服但不自动打开浏览器
-ghrah dev down              # 停止 dev 会话（收束整棵进程树）
+ghrah dev run               # 构建后前台起服；已在跑则先停、回收端口，再重启
+ghrah dev run --no-restart  # 只构建／升级，不起服
+ghrah dev run --full        # 忽略指纹强制全量重建
+ghrah dev run --no-browser  # 起服但不自动打开浏览器
+ghrah dev stop              # 停止 dev 会话（收束整棵进程树）
 ghrah dev reset             # 清空 .dev（含产物），下次必然全量
 ```
 
-`dev up` 是**幂等**的「确保按当前工作树跑起来」：已有 dev 会话就先停止并**等端口真正释放**再起，不会出现「已在运行就跳过」的空操作，也不会因端口未回收而绑定失败。发布态会话占用同一对端口时同样会让位。
+动词沿用本仓既有词汇（`start`／`stop`）：`run` 表示"前台跑起来并监督"，`stop` 表示停止。
+`up`／`down` 保留为别名（等价于 `run`／`stop`），旧脚本无需改动。
 
-`dev up` 是**前台**命令：起服后在当前终端持续监督，直到 Ctrl-C（或在另一终端执行 `ghrah dev down`）。就绪后控制台会打印访问地址：
+`dev run` 是**幂等**的「确保按当前工作树跑起来」：已有 dev 会话就先停止并**等端口真正释放**再起，不会出现「已在运行就跳过」的空操作，也不会因端口未回收而绑定失败。发布态会话占用同一对端口时同样会让位。
+
+`dev run` 是**前台**命令：起服后在当前终端持续监督，直到 Ctrl-C（或在另一终端执行 `ghrah dev stop`）。就绪后控制台会打印访问地址：
 
 ```text
 [dev] ===== dev 环境已就绪 =====
@@ -101,7 +104,7 @@ dev 与发布态共用端口：起服前若存在 boot 会话会先停止它，�
 
 代内 Python 钉 monorepo `requires-python` 的下限版本（当前 3.11），而不是工具链自身解释器：运行时闭包里的 C 扩展（httptools 等）在最新 CPython 上常无预编译 wheel，会退化成源码编译（Windows 需 MSVC）。工具链自身的 Python 版本与代内环境仍然各管各的。
 
-调试时把 `-v`／`--verbose` 放在子命令之前（`ghrah -v dev up`）。Windows 上运行中的 Python 持有 `.pyd`／`.pyc` 文件锁，因此「停旧 → 装 → 起新」的顺序不可颠倒；构建阶段可以让旧服继续跑。
+调试时把 `-v`／`--verbose` 放在子命令之前（`ghrah -v dev run`）。Windows 上运行中的 Python 持有 `.pyd`／`.pyc` 文件锁，因此「停旧 → 装 → 起新」的顺序不可颠倒；构建阶段可以让旧服继续跑。
 
 ## 现有产物与安装功能
 

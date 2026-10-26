@@ -621,10 +621,10 @@ def dev_status(ctx: DevContext) -> int:
     return 0
 
 
-def dev_up(
+def dev_run(
     ctx: DevContext, *, no_restart: bool, force_full: bool, open_browser: bool = True
 ) -> int:
-    logger.info("dev up: distro=%s repo=%s head=%s", ctx.distro, ctx.repo, _git_head(ctx.repo))
+    logger.info("dev run: distro=%s repo=%s head=%s", ctx.distro, ctx.repo, _git_head(ctx.repo))
     fp = _compute_fingerprints(ctx.repo)
     state = _load_state(ctx.dev_root)
     gen = ctx.gen
@@ -711,12 +711,12 @@ def dev_up(
     return asyncio.run(_serve_dev(ctx, open_browser=open_browser))
 
 
-def dev_down(ctx: DevContext) -> int:
+def dev_stop(ctx: DevContext) -> int:
     if not (ctx.dev_root / DEV_PID).is_file():
-        print("[dev] dev 会话未在运行")
+        print("[dev] dev 会话未在运行", flush=True)
         return 0
     _stop_dev_session(ctx)
-    print("[dev] 已停止 dev 会话")
+    print("[dev] 已停止 dev 会话", flush=True)
     return 0
 
 
@@ -760,21 +760,21 @@ def _setup_dev_session_io(ctx: DevContext) -> None:
 
 
 def run_dev_command(args: argparse.Namespace) -> int:
-    """``dev`` 子命令统一分发（status/up/down/reset）。"""
+    """``dev`` 子命令统一分发（status／run／stop／reset；``up``／``down`` 为别名）。"""
     ctx = _resolve_context(args)
     _setup_dev_session_io(ctx)
     cmd = args.subcommand
     if cmd == "status":
         return dev_status(ctx)
-    if cmd == "up":
-        return dev_up(
+    if cmd in ("run", "up"):
+        return dev_run(
             ctx,
             no_restart=bool(getattr(args, "no_restart", False)),
             force_full=bool(getattr(args, "full", False)),
             open_browser=not bool(getattr(args, "no_browser", False)),
         )
-    if cmd == "down":
-        return dev_down(ctx)
+    if cmd in ("stop", "down"):
+        return dev_stop(ctx)
     if cmd == "reset":
         return dev_reset(ctx)
     raise ToolchainError(f"未知 dev 子命令: {cmd}")
