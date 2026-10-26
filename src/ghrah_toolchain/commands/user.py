@@ -16,8 +16,8 @@ def _json(parser):
 def _install(parser):
     _target(parser)
     _json(parser)
-    parser.add_argument("--repo", "--from", dest="repo", help="本地运行时 Git 源仓路径")
-    parser.add_argument("--ref", help="latest | branch:<name> | commit:<sha>")
+    parser.add_argument("--repo", "--from", dest="repo", help="本地 Git 路径或 HTTPS/SSH 仓库 URL")
+    parser.add_argument("--ref", help="latest | branch:<name> | tag:<name> | commit:<sha>")
     parser.add_argument("--version", help="版本名（默认取候选提交月份）")
     parser.add_argument("--gate", help="目前只支持 basic")
     parser.add_argument("--subject-port", type=int, default=4112, help="首装后端端口")
@@ -27,7 +27,7 @@ def _install(parser):
 
 def _update(parser):
     _target(parser)
-    parser.add_argument("--repo", help="本次更新使用的本地源仓路径")
+    parser.add_argument("--repo", help="本次更新使用的本地 Git 路径或远程 URL")
     parser.add_argument("--source", "--ref", dest="source", help="本次候选来源，不改变跟踪配置")
     parser.add_argument("--gate", help="目前只支持 basic")
     parser.add_argument("--check", action="store_true", help="只读比较本地候选，不构建或切换")

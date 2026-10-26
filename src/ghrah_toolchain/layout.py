@@ -99,6 +99,7 @@ class DistroToml:
     name: str = ""
     scenario: str = ""
     repo_path: str = ""
+    repo_url: str = ""
     ref_source: str = "latest"
     ref_gate: str = "basic"
     ref_fetch_on_update: bool = False
@@ -143,6 +144,7 @@ class DistroToml:
             (distro, "name", ""),
             (distro, "scenario", ""),
             (repo, "path", ""),
+            (repo, "url", ""),
             (ref, "source", "latest"),
             (ref, "gate", "basic"),
             (data_section, "root", ""),
@@ -150,6 +152,8 @@ class DistroToml:
             if not isinstance(section.get(key, default), str):
                 raise LayoutError(f"{path}: {key} 必须是字符串")
         enabled = plugins.get("enabled", [])
+        if repo.get("path") and repo.get("url"):
+            raise LayoutError(f"{path}: distro.repo.path 与 url 不能同时设置")
         if not isinstance(enabled, list) or not all(isinstance(item, str) for item in enabled):
             raise LayoutError(f"{path}: enabled 必须是字符串数组")
         install_mode = distro.get("install_mode")
@@ -168,6 +172,7 @@ class DistroToml:
             name=str(distro.get("name", "")),
             scenario=str(distro.get("scenario", "")),
             repo_path=str(repo.get("path", "")),
+            repo_url=str(repo.get("url", "")),
             ref_source=str(ref.get("source", "latest")),
             ref_gate=str(ref.get("gate", "basic")),
             ref_fetch_on_update=bool(ref.get("fetch_on_update", False)),
@@ -289,6 +294,8 @@ def render_distro_toml(
     webui_port: int,
     data_root: str,
     snapshot_keep: int,
+    repo_url: str = "",
+    fetch_on_update: bool = False,
 ) -> str:
     """首次 install 的 distro.toml 模板（手写序列化；``DistroToml.load`` 可读回）。"""
     lines = [
@@ -299,12 +306,12 @@ def render_distro_toml(
         'scenario = ""',
         "",
         "[distro.repo]",
-        f"path = {_toml_str(repo_path)}",
+        f"url = {_toml_str(repo_url)}" if repo_url else f"path = {_toml_str(repo_path)}",
         "",
         "[distro.ref]",
         f"source = {_toml_str(source)}",
         f"gate = {_toml_str(gate)}",
-        "fetch_on_update = false",
+        f"fetch_on_update = {str(fetch_on_update).lower()}",
         "",
         "[distro.plugins]",
         "enabled = []",

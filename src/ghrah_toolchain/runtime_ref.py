@@ -62,6 +62,7 @@ from ghrah_toolchain.materialize import (
     materialize_generation,
     read_generation,
 )
+from ghrah_toolchain.repository import RemoteRepository, RepositorySource, require_git
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ def acquire_distro_lock(distro_root: Path, *, stale_after: float = _STALE_LOCK_S
                     path.unlink()
                 continue
             raise RuntimeRefError(
-                f"另一引导器操作正在运行（锁: {path}）；请等待其完成或先 stop 后重试"
+                f"另一工具链操作正在运行（锁: {path}）；请等待其完成后重试"
             ) from None
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(str(os.getpid()))
@@ -188,9 +189,9 @@ def repoint_last_good(distro_root: Path, ver: str) -> None:
 
 @dataclass
 class RefSource:
-    """签出源：``latest``（全局最近 ref tip）| ``branch:<name>`` | ``commit:<sha>``。"""
+    """签出源：latest、branch:<name>、tag:<name> 或 commit:<sha>。"""
 
-    kind: str  # latest / branch / commit
+    kind: str  # latest / branch / tag / commit
     value: str | None
 
     @classmethod
@@ -203,9 +204,11 @@ class RefSource:
             return cls(kind="latest", value=None)
         if ":" in text:
             kind, _, value = text.partition(":")
-            if kind in ("branch", "commit") and value:
+            if kind in ("branch", "tag", "commit") and value:
                 return cls(kind=kind, value=value)
-        raise RuntimeRefError(f"非法 ref 源: {raw!r}（应为 latest | branch:<n> | commit:<sha>）")
+        raise RuntimeRefError(
+            f"非法 ref 源: {raw!r}（应为 latest | branch:<n> | tag:<n> | commit:<sha>）"
+        )
 
     def render(self) -> str:
         if self.kind == "latest":
@@ -250,7 +253,7 @@ class BootEntry:
 class RuntimeRefManager:
     """GPT 枚举 / 源解析 / 建树 / 门禁 / 快照 / 重指 / sync 的统一状态机。"""
 
-    def __init__(self, *, root: Path | None = None, repo: Path | None = None) -> None:
+    def __init__(self, *, root: Path | None = None, repo: str | Path | None = None) -> None:
         self._root = root or ghrah_root()
         self._repo = repo
 
@@ -317,6 +320,7 @@ class RuntimeRefManager:
         initial_config: str | None = None,
     ) -> BootEntry:
         """安装/切换到候选 commit 并重指 ``current``（全程持锁）。"""
+        require_git()
         if gate != "basic":
             raise GateError("目前只支持 basic 门禁，full/data 尚未实现")
         if version and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", version) is None:
@@ -374,9 +378,42 @@ class RuntimeRefManager:
         version: str | None,
         gate: str,
     ) -> BootEntry:
-        del update  # 语义检查已在入口完成（无 current 的 update 被拒绝）
         distro_root.mkdir(parents=True, exist_ok=True)
-        repo = self._resolve_repo(distro_root, distro_toml)
+        location = self._repo_source(distro_toml)
+        if location.remote:
+            context = RemoteRepository(self._root, location).prepare(
+                refresh=fetch, allow_clone=(not update or fetch)
+            )
+        else:
+            context = contextlib.nullcontext(Path(location.location))
+        with context as repo:
+            return self._ensure_repository_locked(
+                distro,
+                distro_root,
+                distro_toml,
+                boot_before,
+                old,
+                repo,
+                fetch=fetch and not location.remote,
+                source=source,
+                version=version,
+                gate=gate,
+            )
+
+    def _ensure_repository_locked(
+        self,
+        distro: str,
+        distro_root: Path,
+        distro_toml: DistroToml,
+        boot_before: BootToml,
+        old: BootEntry | None,
+        repo: Path,
+        *,
+        fetch: bool,
+        source: str | RefSource | None,
+        version: str | None,
+        gate: str,
+    ) -> BootEntry:
         src = self._coerce_source(source, distro_toml)
         commit = self._resolve_candidate(src, fetch=fetch, repo=repo)
 
@@ -501,17 +538,28 @@ class RuntimeRefManager:
     # ── 源解析 ──
 
     def _resolve_repo(self, distro_root: Path, distro_toml: DistroToml) -> Path:
-        """仓路径优先级：``--repo`` > env ``GHRAH_MONOREPO_ROOT`` > ``distro.toml`` > 报错。"""
+        """只读解析；远程仓只使用已有缓存，状态和 --check 不隐式联网。"""
+        source = self._repo_source(distro_toml)
+        if source.remote:
+            return RemoteRepository(self._root, source).cached()
+        return Path(source.location)
+
+    def _repo_source(self, distro_toml: DistroToml) -> RepositorySource:
+        """显式参数 > 环境 > 实例声明，远程 URL 不混入 path 字段。"""
         if self._repo is not None:
-            return self._repo
+            return RepositorySource.parse(self._repo)
         env = os.environ.get("GHRAH_MONOREPO_ROOT")
         if env:
-            return Path(env).expanduser()
+            return RepositorySource.parse(env)
+        if distro_toml.repo_url:
+            source = RepositorySource.parse(distro_toml.repo_url)
+            if not source.remote:
+                raise RuntimeRefError("distro.repo.url 必须是 Git URL")
+            return source
         if distro_toml.repo_path:
-            return Path(distro_toml.repo_path).expanduser()
+            return RepositorySource.parse(distro_toml.repo_path)
         raise RuntimeRefError(
-            "未指定运行时仓：提供 --repo、设置 env GHRAH_MONOREPO_ROOT "
-            f"或在 {distro_root / 'distro.toml'} 写 [distro.repo].path"
+            "未指定运行时仓：提供 --repo、设置 env GHRAH_MONOREPO_ROOT 或设置 distro.repo.path/url"
         )
 
     @staticmethod
@@ -522,11 +570,15 @@ class RuntimeRefManager:
 
     def _resolve_candidate(self, source: RefSource, *, fetch: bool, repo: Path) -> str:
         """解析候选 commit 并经 ``rev-parse --verify <x>^{commit}`` 归一化（peel 注解标签）。"""
+        require_git()
         if fetch:
             cp = self._run(["git", "-C", str(repo), "fetch", "--all"], check=False)
             if cp.returncode != 0:
                 raise RuntimeRefError(f"git fetch 失败，未切换版本: {cp.stderr.strip()}")
-        if source.kind == "latest":
+        if source.kind == "latest" and (repo / "HEAD").is_file():
+            # bare 远程缓存的默认分支，不以其他试验分支的日期决定安装目标。
+            sha = "HEAD"
+        elif source.kind == "latest":
             # 注解标签的 %(objectname) 是 tag 对象，须 peel 成 commit
             out = self._run(
                 [
@@ -544,8 +596,20 @@ class RuntimeRefManager:
             sha = out.splitlines()[0].strip()
         else:
             sha = source.value or ""
+            if source.kind == "branch":
+                sha = f"refs/heads/{sha}"
+            elif source.kind == "tag":
+                sha = f"refs/tags/{sha}"
         cp = self._run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", f"{sha}^{{commit}}"],
+            [
+                "git",
+                "-C",
+                str(repo),
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"{sha}^{{commit}}",
+            ],
             check=False,
         )
         if cp.returncode != 0 or not cp.stdout.strip():

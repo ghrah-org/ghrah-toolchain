@@ -187,7 +187,7 @@ def test_refsource_parse_and_render() -> None:
 
 
 def test_refsource_parse_rejects_invalid() -> None:
-    for bad in ("", "tag:v1", "branch:", "commit:", "x:y:z", "latest:x", "branch"):
+    for bad in ("", "tag:", "branch:", "commit:", "x:y:z", "latest:x", "branch"):
         with pytest.raises(RuntimeRefError, match="非法 ref 源"):
             RefSource.parse(bad)
 

@@ -24,6 +24,7 @@ DISTRO_DEFAULTS = {
     "data.snapshot_keep": 3,
 }
 SELF_DEFAULTS = {"self.output": "text", "self.log_tail": 100}
+DISTRO_SOURCE_KEYS = {"distro.repo.path": "", "distro.repo.url": ""}
 
 
 def _lookup(data: dict, key: str, default: Any) -> tuple[Any, bool]:
@@ -36,7 +37,7 @@ def _lookup(data: dict, key: str, default: Any) -> tuple[Any, bool]:
 
 
 def validate_value(key: str, value: Any) -> None:
-    default = (DISTRO_DEFAULTS | SELF_DEFAULTS).get(key)
+    default = (DISTRO_DEFAULTS | SELF_DEFAULTS | DISTRO_SOURCE_KEYS).get(key)
     if default is None:
         raise ToolchainError(f"不支持的配置键: {key}")
     if type(value) is not type(default):
@@ -47,6 +48,11 @@ def validate_value(key: str, value: Any) -> None:
         raise ToolchainError(f"{key} 必须在 0–10000 之间")
     if key == "distro.ref.source":
         RefSource.parse(value)
+    if key == "distro.repo.url" and value:
+        from ghrah_toolchain.repository import RepositorySource
+
+        if not RepositorySource.parse(value).remote:
+            raise ToolchainError("distro.repo.url 必须是 Git URL")
     if key == "distro.ref.gate" and value != "basic":
         raise ToolchainError("目前只支持 basic 门禁，full/data 尚未实现")
     if key == "self.output" and value not in {"text", "json"}:
@@ -75,7 +81,7 @@ def config_view(name: str | None = None) -> dict[str, dict]:
     if name and not path.is_file():
         raise ToolchainError(f"实例未安装: {name}")
     data = read_toml(path)
-    defaults = DISTRO_DEFAULTS if name else SELF_DEFAULTS
+    defaults = DISTRO_DEFAULTS | DISTRO_SOURCE_KEYS if name else SELF_DEFAULTS
     result = {}
     for key, default in defaults.items():
         value, explicit = _lookup(data, key, default)
@@ -89,11 +95,12 @@ def config_view(name: str | None = None) -> dict[str, dict]:
                 "next-command"
                 if not name
                 else "next-install-or-update"
-                if key.startswith("distro.ref.")
+                if key.startswith(("distro.ref.", "distro.repo."))
                 else "next-update"
                 if key == "data.snapshot_keep"
                 else "next-start"
             ),
+            "read_only": key in DISTRO_SOURCE_KEYS,
         }
     return result
 

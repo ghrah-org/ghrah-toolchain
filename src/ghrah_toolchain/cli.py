@@ -127,15 +127,19 @@ def _cmd_install(args: argparse.Namespace) -> int:
     distro_root = resolve_distro_root(distro, root)
     distro_toml = DistroToml.load(distro_root)
     repo_arg = args.repo or os.environ.get("GHRAH_MONOREPO_ROOT")
-    if not distro_root.is_dir() or not distro_toml.repo_path:
+    if not distro_root.is_dir() or not (distro_toml.repo_path or distro_toml.repo_url):
         if not repo_arg:
             raise ToolchainError("首次安装需要 --repo 或 env GHRAH_MONOREPO_ROOT 指定运行时仓路径")
-        repo_path = Path(repo_arg).expanduser().resolve()
-        if not repo_path.is_dir():
-            raise ToolchainError(f"运行时仓不存在: {repo_path}")
+        from ghrah_toolchain.repository import RepositorySource
+
+        location = RepositorySource.parse(repo_arg)
+        if not location.remote and not Path(location.location).is_dir():
+            raise ToolchainError(f"运行时仓不存在: {location.location}")
         rendered = render_distro_toml(
             name=distro,
-            repo_path=str(repo_path),
+            repo_path="" if location.remote else location.location,
+            repo_url=location.location if location.remote else "",
+            fetch_on_update=location.remote,
             source=args.ref or "latest",
             gate=args.gate or "basic",
             subject_port=args.subject_port,
@@ -165,6 +169,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
         version=args.version,
         gate=_resolve_gate(args, distro_toml),
         initial_config=rendered,
+        fetch=(location.remote if rendered else distro_toml.ref_fetch_on_update),
     )
     if args.adopt_legacy_data:
         report = adopt_legacy(
@@ -580,6 +585,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     del args
     boot = BootToml.load()
     print(f"ghrah-toolchain {__version__}")
+    import shutil
+
+    print(
+        "源码安装依赖: "
+        + ", ".join(f"{tool}={shutil.which(tool) or '缺失'}" for tool in ("git", "uv", "pnpm"))
+    )
     print(f"default={boot.default!r} fallback={boot.fallback!r} last_good={boot.last_good!r}")
     manager = RuntimeRefManager()
     for distro in list_distros():
