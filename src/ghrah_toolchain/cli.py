@@ -562,6 +562,7 @@ def _build_parser() -> argparse.ArgumentParser:
     dev_up.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
     dev_up.add_argument("--no-restart", action="store_true", help="只构建/升级，不启动服务")
     dev_up.add_argument("--full", action="store_true", help="强制全量重建（忽略增量指纹）")
+    dev_up.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     dev_up.set_defaults(func=_cmd_dev)
     dev_down = dev_sub.add_parser("down", help="停止运行中的 dev 会话")
     dev_down.add_argument("--distro", help="发行版名（默认取 boot.toml default）")

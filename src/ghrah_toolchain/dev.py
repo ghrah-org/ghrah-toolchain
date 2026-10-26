@@ -37,6 +37,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,6 +84,8 @@ WORK = ".work"
 STATE_SCHEMA = 1
 DEPS_FILES = ("pyproject.toml", "uv.lock", "pnpm-lock.yaml", "pnpm-workspace.yaml")
 WEBUI_UNIT = "ghrah-observer-webui"
+# dev 会话自身的日志（与 start 的 <distro>/logs/<token>.log 对齐）
+LOGFILE = "dev.log"
 
 
 # ── 子进程与 git ─────────────────────────────────────────────
@@ -365,11 +368,21 @@ def _smoke(gen: Path) -> None:
 
 def _kill_tree(pid: int) -> None:
     if os.name == "nt":
-        subprocess.run(
+        cp = subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(pid)],
             capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
+        if cp.returncode != 0:
+            logger.warning(
+                "taskkill 失败(pid=%s, rc=%s): %s",
+                pid,
+                cp.returncode,
+                (cp.stderr or cp.stdout or "").strip(),
+            )
     else:
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGTERM)
@@ -382,7 +395,11 @@ def _kill_tree(pid: int) -> None:
 
 
 def _stop_dev_session(ctx: DevContext) -> bool:
-    """停掉运行中的 dev 会话（读 .dev/dev.pid）。返回是否确曾发出停止。"""
+    """停掉运行中的 dev 会话（读 .dev/dev.pid）。返回是否确曾发出停止。
+
+    停不掉时**抛错**而不是继续：``dev down`` 谎报「已停止」、或 ``dev up`` 在旧
+    会话仍持有 venv 文件锁的情况下继续升级，两者都比直接失败更难查。
+    """
     pidfile = ctx.dev_root / DEV_PID
     if not pidfile.is_file():
         return False
@@ -391,11 +408,15 @@ def _stop_dev_session(ctx: DevContext) -> bool:
     except OSError, ValueError:
         pid = 0
     if pid and _pid_alive(pid) is True:
-        print(f"[dev] 停止旧的 dev 会话 (pid={pid}) …")
+        print(f"[dev] 停止旧的 dev 会话 (pid={pid}) …", flush=True)
         _kill_tree(pid)
         deadline = time.monotonic() + 15.0
         while _pid_alive(pid) is not False and time.monotonic() < deadline:
             time.sleep(0.2)
+        if _pid_alive(pid) is not False:
+            raise ToolchainError(
+                f"无法停止 dev 会话 (pid={pid})；请手动结束该进程后重试（pidfile: {pidfile}）"
+            )
     with contextlib.suppress(OSError):
         pidfile.unlink()
     return pid != 0
@@ -440,7 +461,7 @@ def _dev_webui_root(ctx: DevContext) -> Path:
 # ── 起服（前台监督，镜像 run_boot 但钉 .dev/gen） ─────────────
 
 
-async def _serve_dev(ctx: DevContext) -> int:
+async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
     data_root = resolve_data_root(ctx.layout, ctx.toml)
     ensure_data_dirs(data_root)
     sport = ctx.toml.subject_port
@@ -449,7 +470,7 @@ async def _serve_dev(ctx: DevContext) -> int:
         host=DEFAULT_HOST,
         subject_port=sport,
         webui_port=wport,
-        open_browser=False,
+        open_browser=open_browser,
     )
     os_env = {
         **build_data_plane_env(data_root),
@@ -476,13 +497,35 @@ async def _serve_dev(ctx: DevContext) -> int:
             logger.debug("signal handler unavailable: %s", sig)
     pidfile = ctx.dev_root / DEV_PID
     pidfile.parent.mkdir(parents=True, exist_ok=True)
-    pidfile.write_text(f"{os.getpid()}\n", encoding="utf-8")
     try:
-        await stack.start()
+        pidfile.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    except OSError as exc:
+        raise ToolchainError(
+            f"无法写 dev pidfile: {pidfile}（{exc}）；该目录需可写——若被其它进程占用请先停止它"
+        ) from exc
+    try:
         print(
-            f"[dev] 服务已启动：subject http://{config.host}:{sport}  "
-            f"webui {config.webui_url()}（venv={ctx.gen / 'env' / '.venv'}）"
+            f"[dev] 正在启动 OS 与前端（subject :{sport} / webui :{wport}）…",
+            flush=True,
         )
+        await stack.start()
+        print("", flush=True)
+        print("[dev] ===== dev 环境已就绪 =====", flush=True)
+        print(f"[dev]   前端页面  {config.webui_url()}", flush=True)
+        print(
+            f"[dev]   后端接口  http://{config.host}:{sport}"
+            f"（/health、ws {config.subject_ws_url()}）",
+            flush=True,
+        )
+        print(f"[dev]   运行日志  {ctx.dev_root / LOGFILE}", flush=True)
+        print(f"[dev]   开发 venv {ctx.gen / 'env' / '.venv'}", flush=True)
+        print(
+            "[dev]   浏览器已自动打开（要关闭用 --no-browser）"
+            if open_browser
+            else "[dev]   浏览器未打开（--no-browser）",
+            flush=True,
+        )
+        print("[dev] Ctrl-C 停止；或在另一终端运行 ghrah dev down", flush=True)
         while True:
             if stop.is_set():
                 logger.info("收到停止信号，逆序收束 dev 子进程（webui → OS）")
@@ -537,7 +580,10 @@ def dev_status(ctx: DevContext) -> int:
     return 0
 
 
-def dev_up(ctx: DevContext, *, no_restart: bool, force_full: bool) -> int:
+def dev_up(
+    ctx: DevContext, *, no_restart: bool, force_full: bool, open_browser: bool = True
+) -> int:
+    logger.info("dev up: distro=%s repo=%s head=%s", ctx.distro, ctx.repo, _git_head(ctx.repo))
     fp = _compute_fingerprints(ctx.repo)
     state = _load_state(ctx.dev_root)
     gen = ctx.gen
@@ -565,15 +611,17 @@ def dev_up(ctx: DevContext, *, no_restart: bool, force_full: bool) -> int:
         src = work / f"src-{os.getpid()}"
 
         try:
-            print("[dev] 快照工作树 →", src)
+            print(f"[dev] 快照工作树 → {src}", flush=True)
             _snapshot_worktree(ctx.repo, src)
 
             if do_full:
-                print("[dev] 全量构建（wheels + pins + webui）…")
+                print(
+                    "[dev] 全量构建（wheels + pins + webui，含 pnpm 打包，可能数分钟）…", flush=True
+                )
                 _build_full(src, artifacts)
                 rebuild_packages = list(PYTHON_PACKAGES)
             else:
-                print(f"[dev] 增量构建（{', '.join(py_changed)}）…")
+                print(f"[dev] 增量构建（{', '.join(py_changed)}）…", flush=True)
                 _build_incremental(src, artifacts, py_changed)
                 rebuild_packages = py_changed
 
@@ -581,13 +629,13 @@ def dev_up(ctx: DevContext, *, no_restart: bool, force_full: bool) -> int:
             _stop_dev_session(ctx)
 
             if do_full or not _gen_ready(gen):
-                print("[dev] 全量物化 dev venv …")
+                print("[dev] 全量物化 dev venv …", flush=True)
                 _materialize_dev(ctx.distro_root, artifacts, gen)
             else:
-                print("[dev] 增量升级 dev venv …")
+                print("[dev] 增量升级 dev venv …", flush=True)
                 _upgrade_dev(ctx.distro_root, artifacts, gen, rebuild_packages)
 
-            print("[dev] 冒烟（import 五包 + 入口）…")
+            print("[dev] 冒烟（import 五包 + 入口）…", flush=True)
             _smoke(gen)
         finally:
             _rmtree(src) if src.exists() else None
@@ -607,16 +655,17 @@ def dev_up(ctx: DevContext, *, no_restart: bool, force_full: bool) -> int:
         print(
             "[dev] 已构建/升级，未启动服务（--no-restart）"
             if needs_build
-            else "[dev] 无变更，未启动服务（--no-restart）"
+            else "[dev] 无变更，未启动服务（--no-restart）",
+            flush=True,
         )
         return 0
 
     if not needs_build and _dev_session_alive(ctx):
-        print("[dev] 无变更，且 dev 服务已在运行 → 无需操作")
+        print("[dev] 无变更，且 dev 服务已在运行 → 无需操作", flush=True)
         return 0
 
     _stop_release_if_running(ctx)
-    return asyncio.run(_serve_dev(ctx))
+    return asyncio.run(_serve_dev(ctx, open_browser=open_browser))
 
 
 def dev_down(ctx: DevContext) -> int:
@@ -637,9 +686,40 @@ def dev_reset(ctx: DevContext) -> int:
     return 0
 
 
+def _setup_dev_session_io(ctx: DevContext) -> None:
+    """dev 会话 IO 约定：stdout 逐行 flush + 自身日志落 ``.dev/dev.log``。
+
+    三件事都是对「跑起来像没在跑」的修复：
+
+    1. ``print`` 在管道／IDE 控制台下是块缓冲——不显式逐行 flush，构建阶段的
+       ``[dev] ...`` 一行都不会及时出现，而子进程（uvicorn）因继承 fd 立刻可见，
+       观感就是"卡住且没有日志"。
+    2. ``start`` 的后台会话有 ``<distro>/logs/<token>.log``；dev 此前不留任何日志
+       文件。这里挂一个 INFO 级 FileHandler，把监督侧的 INFO 记录留下来。
+    3. 日志文件是**补充手段、不是必需品**：``delay=True`` 惰性打开，且打不开就
+       只告警——绝不让「写不了日志」把 ``dev down`` 这类命令一起弄挂。
+    """
+    with contextlib.suppress(AttributeError, ValueError, OSError):
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+    log_path = ctx.dev_root / LOGFILE
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    try:
+        handler = logging.FileHandler(log_path, encoding="utf-8", delay=True)
+    except OSError:
+        logger.warning("dev 日志文件不可用，本次仅输出到控制台: %s", log_path, exc_info=True)
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    handler.setLevel(logging.INFO)
+    root.addHandler(handler)
+    if root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+
+
 def run_dev_command(args: argparse.Namespace) -> int:
     """``dev`` 子命令统一分发（status/up/down/reset）。"""
     ctx = _resolve_context(args)
+    _setup_dev_session_io(ctx)
     cmd = args.subcommand
     if cmd == "status":
         return dev_status(ctx)
@@ -648,6 +728,7 @@ def run_dev_command(args: argparse.Namespace) -> int:
             ctx,
             no_restart=bool(getattr(args, "no_restart", False)),
             force_full=bool(getattr(args, "full", False)),
+            open_browser=not bool(getattr(args, "no_browser", False)),
         )
     if cmd == "down":
         return dev_down(ctx)
