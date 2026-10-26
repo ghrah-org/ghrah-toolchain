@@ -322,6 +322,13 @@ def _cmd_stop(args: argparse.Namespace) -> int:
     return code
 
 
+def _cmd_dev(args: argparse.Namespace) -> int:
+    """本地开发快环：status / up / down / reset（只读写 ``<distro>/.dev/``）。"""
+    from ghrah_toolchain.dev import run_dev_command
+
+    return run_dev_command(args)
+
+
 def _instance_name(args: argparse.Namespace) -> str:
     if args.name and args.distro and args.name != args.distro:
         raise ToolchainError("实例位置参数与 --distro 冲突")
@@ -438,6 +445,12 @@ def _build_parser() -> argparse.ArgumentParser:
         description="ghrah 开发、组合校验与具名实例管理工具链",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="DEBUG 级日志（默认 WARNING；置于子命令之前，如 ghrah -v dev up）",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     for command in ("check", "metadata"):
@@ -540,6 +553,23 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor = subparsers.add_parser("doctor", help="诊断安装域布局与配置")
     doctor.set_defaults(func=_cmd_doctor)
 
+    dev = subparsers.add_parser("dev", help="本地开发快环（工作树增量构建 + 本地起服）")
+    dev_sub = dev.add_subparsers(dest="subcommand")
+    dev_status = dev_sub.add_parser("status", help="对比工作树与上次 dev 构建，报告变更")
+    dev_status.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
+    dev_status.set_defaults(func=_cmd_dev)
+    dev_up = dev_sub.add_parser("up", help="增量构建并本地起服（接管正式端口）")
+    dev_up.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
+    dev_up.add_argument("--no-restart", action="store_true", help="只构建/升级，不启动服务")
+    dev_up.add_argument("--full", action="store_true", help="强制全量重建（忽略增量指纹）")
+    dev_up.set_defaults(func=_cmd_dev)
+    dev_down = dev_sub.add_parser("down", help="停止运行中的 dev 会话")
+    dev_down.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
+    dev_down.set_defaults(func=_cmd_dev)
+    dev_reset = dev_sub.add_parser("reset", help="清空 .dev 命名空间，回到未 dev 状态")
+    dev_reset.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
+    dev_reset.set_defaults(func=_cmd_dev)
+
     return parser
 
 
@@ -547,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(
-        level=logging.WARNING,
+        level=logging.DEBUG if getattr(args, "verbose", False) else logging.WARNING,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     if getattr(args, "func", None) is None:
