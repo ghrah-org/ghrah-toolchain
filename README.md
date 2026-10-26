@@ -73,14 +73,16 @@ dev 从**工作树**（含未提交改动）增量构建并本地起服，用于
 前置：该实例已安装并重指过 `current`（`create`／`install` 的产物），且 `distro.toml` 的 `[distro.repo].path` 指向有效的源码仓工作树。
 
 ```sh
-ghrah dev status            # 对比工作树与上次 dev 构建，报「全量 / 增量（哪些包）」
-ghrah dev up                # 构建 + 物化 dev venv + 接管端口前台起服
+ghrah dev status            # 对比工作树与上次 dev 构建，报「全量 / 增量（哪些包）」+ 会话状态
+ghrah dev up                # 构建后前台起服；已在跑则先停、回收端口，再重启
 ghrah dev up --no-restart   # 只构建／升级，不起服
 ghrah dev up --full         # 忽略指纹强制全量重建
 ghrah dev up --no-browser   # 起服但不自动打开浏览器
 ghrah dev down              # 停止 dev 会话（收束整棵进程树）
 ghrah dev reset             # 清空 .dev（含产物），下次必然全量
 ```
+
+`dev up` 是**幂等**的「确保按当前工作树跑起来」：已有 dev 会话就先停止并**等端口真正释放**再起，不会出现「已在运行就跳过」的空操作，也不会因端口未回收而绑定失败。发布态会话占用同一对端口时同样会让位。
 
 `dev up` 是**前台**命令：起服后在当前终端持续监督，直到 Ctrl-C（或在另一终端执行 `ghrah dev down`）。就绪后控制台会打印访问地址：
 

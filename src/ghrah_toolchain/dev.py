@@ -68,7 +68,7 @@ from ghrah_toolchain.layout import (
     ensure_data_dirs,
     resolve_data_root,
 )
-from ghrah_toolchain.lifecycle import DEFAULT_HOST, BootStack, StackConfig
+from ghrah_toolchain.lifecycle import DEFAULT_HOST, BootStack, StackConfig, port_in_use
 from ghrah_toolchain.materialize import _install_python_env, _uv_env, _venv_python
 from ghrah_toolchain.runtime_ref import _pid_alive
 
@@ -454,6 +454,26 @@ def _print_access_hint(ctx: DevContext, pid: int | None = None) -> None:
         print("[dev]   停止：Ctrl-C，或在另一终端运行 ghrah dev down", flush=True)
 
 
+def _wait_ports_free(ctx: DevContext, *, timeout: float = 10.0) -> None:
+    """等 dev 端口真正释放后再起服。
+
+    停进程与端口回收之间有延迟（Windows 上尤其明显）；不等就起，会撞
+    ``--strictPort``/绑定失败，报错看着像"服务起不来"而不是"上一个还没退干净"。
+    """
+    ports = (ctx.toml.subject_port, ctx.toml.webui_port)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        busy = [p for p in ports if port_in_use(DEFAULT_HOST, p)]
+        if not busy:
+            return
+        time.sleep(0.2)
+    busy = [p for p in ports if port_in_use(DEFAULT_HOST, p)]
+    raise ToolchainError(
+        f"端口仍被占用: {', '.join(str(p) for p in busy)}；"
+        "请手动停止占用进程（或 ghrah stop）后重试"
+    )
+
+
 def _stop_release_if_running(ctx: DevContext) -> None:
     """开发态接管正式端口前：停掉正在运行的发布态会话（一次只启动一个）。"""
     if not boot_pid_path(ctx.distro_root).is_file():
@@ -681,12 +701,13 @@ def dev_up(
         )
         return 0
 
-    if not needs_build and _dev_session_alive(ctx):
-        print("[dev] 无变更，且 dev 服务已在运行 → 无需重启", flush=True)
-        _print_access_hint(ctx, _read_dev_pid(ctx))
-        return 0
-
+    # up 的语义是「让 dev 服务按当前工作树跑起来」：已在跑就先停、回收端口、再起。
+    # 不做「已在运行就跳过」——那会让 `up` 变成不可预测的空操作。
+    if _dev_session_alive(ctx):
+        print("[dev] 已有 dev 会话在运行 → 先停止再重启", flush=True)
+    _stop_dev_session(ctx)
     _stop_release_if_running(ctx)
+    _wait_ports_free(ctx)
     return asyncio.run(_serve_dev(ctx, open_browser=open_browser))
 
 
