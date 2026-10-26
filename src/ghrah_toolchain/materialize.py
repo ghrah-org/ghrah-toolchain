@@ -31,7 +31,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import tomllib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -47,6 +46,13 @@ GENERATION_TOML = "GENERATION.toml"
 
 _CACHE_SUBDIR_UV = "cache/uv"
 _CACHE_SUBDIR_PNPM = "cache/pnpm-store"
+
+# 代内 Python 钉死为「运行时下限版本」，而不是 toolchain 自身解释器。
+# 运行时闭包里的 C 扩展（httptools 等）在最新 CPython 上常无预编译 wheel，
+# 会退化成源码编译（Windows 需 MSVC Build Tools——实测 3.15 直接失败）；
+# 下限版本 wheel 覆盖最好，且与 monorepo `requires-python = ">=3.11"` 对齐。
+# 调高此值前先确认 pins.txt 里每个 C 扩展都有该版本的 wheel。
+RUNTIME_PYTHON = "3.11"
 
 
 def pnpm_command() -> list[str]:
@@ -337,10 +343,9 @@ def _install_python_env(distro_root: Path, base_tree: Path, venv: Path) -> None:
     pins = base_tree / "wheels" / "pins.txt"
     if not pins.is_file():
         raise MaterializeError(f"基座产物树无 pins.txt: {base_tree}")
-    # 代内 Python 钉死为 toolchain 自身解释器：uv 默认会挑最新版（如 3.15），
-    # 而 lock 里 C 扩展轮子（httptools 等）可能未覆盖到，装时退化成源码编译需 MSVC。
+    # 代内 Python 钉死为运行时下限版本：见 RUNTIME_PYTHON 注释（wheel 覆盖优先于版本新）。
     _run(
-        ["uv", "venv", "--relocatable", "--python", sys.executable, str(venv)],
+        ["uv", "venv", "--relocatable", "--python", RUNTIME_PYTHON, str(venv)],
         env=_uv_env(distro_root),
     )
     py = _venv_python(venv)

@@ -27,7 +27,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import tarfile
 import tempfile
 import tomllib
@@ -37,7 +36,7 @@ from pathlib import Path
 
 from ghrah_toolchain import __version__
 from ghrah_toolchain.errors import BuildError
-from ghrah_toolchain.materialize import pnpm_command
+from ghrah_toolchain.materialize import RUNTIME_PYTHON, pnpm_command
 
 logger = logging.getLogger(__name__)
 
@@ -412,7 +411,7 @@ def verify_artifacts(out_dir: Path) -> None:
         venv = Path(td) / "venv"
         win = os.name == "nt"
         py = venv / ("Scripts/python.exe" if win else "bin/python")
-        _run(["uv", "venv", "--python", sys.executable, str(venv)])
+        _run(["uv", "venv", "--python", RUNTIME_PYTHON, str(venv)])
         install = ["uv", "pip", "install", f"--python={py}"]
         install += [str(w) for w in sorted((out_dir / "wheels").glob("*.whl"))]
         install += ["-r", str(pins)]
