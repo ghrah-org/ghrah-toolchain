@@ -17,6 +17,15 @@ uv run python -m ghrah_toolchain --help
 
 distribution 为 `ghrah-toolchain`，Python import 为 `ghrah_toolchain`，正式 CLI 为 `ghrah`。新包不提供旧的 `ghrah-bootloader` 可执行入口或 Python import。
 
+需要写 `~/.ghrah` 的命令（`dev`／`install`／`start`）请用装好的 `ghrah`，而不要用 `uv run ghrah`：
+
+```sh
+uv tool install --editable .   # 入口 ~/.local/bin/ghrah，工具 venv 在安装域外
+ghrah --version
+```
+
+`uv run ghrah` 使用项目内 `.venv` 的解释器；在受限环境（沙箱、受控终端等）下它只能写工作区，写 `~/.ghrah` 会报 `Permission denied`——`dev` 起服失败时会直接给出这条提示。
+
 ## 检查源码组合
 
 在包含 ghrah.toml 的工作区运行：

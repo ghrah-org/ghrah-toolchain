@@ -501,7 +501,10 @@ async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
         pidfile.write_text(f"{os.getpid()}\n", encoding="utf-8")
     except OSError as exc:
         raise ToolchainError(
-            f"无法写 dev pidfile: {pidfile}（{exc}）；该目录需可写——若被其它进程占用请先停止它"
+            f"无法写 dev pidfile: {pidfile}（{exc}）；该目录需可写。"
+            "若你用的是 `uv run ghrah ...`：该解释器位于工作区内，受限环境下只能写"
+            "工作区，写 ~/.ghrah 会被拒——改用 `uv tool install --editable .` 装出的 "
+            "`ghrah` 命令再试"
         ) from exc
     try:
         print(
