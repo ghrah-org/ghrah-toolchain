@@ -422,16 +422,36 @@ def _stop_dev_session(ctx: DevContext) -> bool:
     return pid != 0
 
 
-def _dev_session_alive(ctx: DevContext) -> bool:
-    """dev 会话是否确在运行（读 .dev/dev.pid + 存活探测）。"""
+def _read_dev_pid(ctx: DevContext) -> int:
+    """读 ``.dev/dev.pid``（缺失/损坏 → 0）。"""
     pidfile = ctx.dev_root / DEV_PID
     if not pidfile.is_file():
-        return False
+        return 0
     try:
-        pid = int(pidfile.read_text(encoding="utf-8").strip() or "0")
+        return int(pidfile.read_text(encoding="utf-8").strip() or "0")
     except OSError, ValueError:
-        return False
+        return 0
+
+
+def _dev_session_alive(ctx: DevContext) -> bool:
+    """dev 会话是否确在运行（读 .dev/dev.pid + 存活探测）。"""
+    pid = _read_dev_pid(ctx)
     return pid != 0 and _pid_alive(pid) is True
+
+
+def _print_access_hint(ctx: DevContext, pid: int | None = None) -> None:
+    """打印访问地址／日志／停止方式（就绪与「已在运行」两条路径共用）。"""
+    print(f"[dev]   前端页面  http://localhost:{ctx.toml.webui_port}", flush=True)
+    print(
+        f"[dev]   后端接口  http://127.0.0.1:{ctx.toml.subject_port}"
+        f"（/health、ws ws://127.0.0.1:{ctx.toml.subject_port}/ws）",
+        flush=True,
+    )
+    print(f"[dev]   运行日志  {ctx.dev_root / LOGFILE}", flush=True)
+    if pid:
+        print(f"[dev]   会话 pid  {pid}（停止用 ghrah dev down）", flush=True)
+    else:
+        print("[dev]   停止：Ctrl-C，或在另一终端运行 ghrah dev down", flush=True)
 
 
 def _stop_release_if_running(ctx: DevContext) -> None:
@@ -514,13 +534,7 @@ async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
         await stack.start()
         print("", flush=True)
         print("[dev] ===== dev 环境已就绪 =====", flush=True)
-        print(f"[dev]   前端页面  {config.webui_url()}", flush=True)
-        print(
-            f"[dev]   后端接口  http://{config.host}:{sport}"
-            f"（/health、ws {config.subject_ws_url()}）",
-            flush=True,
-        )
-        print(f"[dev]   运行日志  {ctx.dev_root / LOGFILE}", flush=True)
+        _print_access_hint(ctx)
         print(f"[dev]   开发 venv {ctx.gen / 'env' / '.venv'}", flush=True)
         print(
             "[dev]   浏览器已自动打开（要关闭用 --no-browser）"
@@ -528,7 +542,6 @@ async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
             else "[dev]   浏览器未打开（--no-browser）",
             flush=True,
         )
-        print("[dev] Ctrl-C 停止；或在另一终端运行 ghrah dev down", flush=True)
         while True:
             if stop.is_set():
                 logger.info("收到停止信号，逆序收束 dev 子进程（webui → OS）")
@@ -580,6 +593,11 @@ def dev_status(ctx: DevContext) -> int:
             print("[dev]   依赖闭包: pyproject.toml / uv.lock / pnpm-lock / pnpm-workspace")
         if webui:
             print(f"[dev]   webui: {WEBUI_UNIT}")
+    if _dev_session_alive(ctx):
+        print("[dev] 当前有 dev 会话在运行：", flush=True)
+        _print_access_hint(ctx, _read_dev_pid(ctx))
+    else:
+        print("[dev] 当前没有运行中的 dev 会话（ghrah dev up 起服）", flush=True)
     return 0
 
 
@@ -664,7 +682,8 @@ def dev_up(
         return 0
 
     if not needs_build and _dev_session_alive(ctx):
-        print("[dev] 无变更，且 dev 服务已在运行 → 无需操作", flush=True)
+        print("[dev] 无变更，且 dev 服务已在运行 → 无需重启", flush=True)
+        _print_access_hint(ctx, _read_dev_pid(ctx))
         return 0
 
     _stop_release_if_running(ctx)
