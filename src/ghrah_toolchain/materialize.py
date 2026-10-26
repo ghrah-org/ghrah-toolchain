@@ -47,6 +47,13 @@ GENERATION_TOML = "GENERATION.toml"
 _CACHE_SUBDIR_UV = "cache/uv"
 _CACHE_SUBDIR_PNPM = "cache/pnpm-store"
 
+# 代内 Python 钉死为「运行时下限版本」，而不是 toolchain 自身解释器。
+# 运行时闭包里的 C 扩展（httptools 等）在最新 CPython 上常无预编译 wheel，
+# 会退化成源码编译（Windows 需 MSVC Build Tools——实测 3.15 直接失败）；
+# 下限版本 wheel 覆盖最好，且与 monorepo `requires-python = ">=3.11"` 对齐。
+# 调高此值前先确认 pins.txt 里每个 C 扩展都有该版本的 wheel。
+RUNTIME_PYTHON = "3.11"
+
 
 def pnpm_command() -> list[str]:
     """跨平台 pnpm 调用形态（Windows 的 .cmd 无法被 create_process 直接 exec）。"""
@@ -65,6 +72,10 @@ def _run(
         env=env,
         capture_output=True,
         text=True,
+        # 子进程（pnpm/uv）输出 UTF-8；中文 Windows 缺省 GBK 解码会崩读线程
+        # （stderr 变 None → 报错信息丢失），显式钉 UTF-8 + 容错替换。
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if cp.returncode != 0:
@@ -332,7 +343,11 @@ def _install_python_env(distro_root: Path, base_tree: Path, venv: Path) -> None:
     pins = base_tree / "wheels" / "pins.txt"
     if not pins.is_file():
         raise MaterializeError(f"基座产物树无 pins.txt: {base_tree}")
-    _run(["uv", "venv", "--relocatable", str(venv)], env=_uv_env(distro_root))
+    # 代内 Python 钉死为运行时下限版本：见 RUNTIME_PYTHON 注释（wheel 覆盖优先于版本新）。
+    _run(
+        ["uv", "venv", "--relocatable", "--python", RUNTIME_PYTHON, str(venv)],
+        env=_uv_env(distro_root),
+    )
     py = _venv_python(venv)
     cmd = ["uv", "pip", "install", f"--python={py}"]
     cmd += [str(w) for w in wheels]
@@ -373,6 +388,15 @@ def _install_webui_env(distro_root: Path, base_tree: Path, manifest: dict, node_
     (node_dir / "package.json").write_text(
         json.dumps(shim, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    # pnpm >=10：overrides 权威位置已迁至 pnpm-workspace.yaml（package.json 的
+    # pnpm 字段被忽略并告警）；<=9 仍读 package.json——双写覆盖全版本。
+    # 值用单引号标量：YAML 双引号处理反斜杠转义，Windows 相对路径会炸。
+    ws_lines = ["packages: []", "overrides:"]
+    for name in sorted(overrides):
+        safe_name = name.replace("'", "''")
+        safe_value = overrides[name].replace("'", "''")
+        ws_lines.append(f"  '{safe_name}': '{safe_value}'")
+    (node_dir / "pnpm-workspace.yaml").write_text("\n".join(ws_lines) + "\n", encoding="utf-8")
     cmd = pnpm_command() + [
         f"--store-dir={distro_root / _CACHE_SUBDIR_PNPM}",
         "install",

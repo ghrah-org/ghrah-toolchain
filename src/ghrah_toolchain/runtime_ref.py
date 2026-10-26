@@ -782,5 +782,9 @@ class RuntimeRefManager:
             env=env,
             capture_output=True,
             text=True,
+            # 子进程输出 UTF-8；中文 Windows 缺省 GBK 解码会崩读线程
+            # （stderr 变 None → 报错信息丢失），显式钉 UTF-8 + 容错替换。
+            encoding="utf-8",
+            errors="replace",
             check=check,
         )

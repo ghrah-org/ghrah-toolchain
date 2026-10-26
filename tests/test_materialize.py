@@ -179,10 +179,18 @@ def test_m3_materialize_full_chain(tmp_path: Path, fake_procs) -> None:
     dep = shim["dependencies"]["@ghrah/observer-web"]
     assert dep.startswith("file:")
     assert (gen / "env" / "node" / dep.removeprefix("file:")).resolve().is_dir()
+    # overrides 双写：package.json（pnpm <=9）+ pnpm-workspace.yaml（pnpm >=10
+    # 权威位置；值单引号标量——双引号反斜杠转义在 Windows 路径上会炸）
     override = shim["pnpm"]["overrides"]["@ghrah/protocol"]
-    assert override.startswith("file:")
-    target = (gen / "env" / "node" / override.removeprefix("file:")).resolve()
-    assert target.is_file() and target.parent == (base_tree / "tarballs").resolve()
+    ws_text = (gen / "env" / "node" / "pnpm-workspace.yaml").read_text(encoding="utf-8")
+    ws_override = next(
+        line for line in ws_text.splitlines() if line.strip().startswith("'@ghrah/protocol'")
+    )
+    ws_value = ws_override.split(":", 1)[1].strip().strip("'")
+    for value in (override, ws_value):
+        assert value.startswith("file:")
+        target = (gen / "env" / "node" / value.removeprefix("file:")).resolve()
+        assert target.is_file() and target.parent == (base_tree / "tarballs").resolve()
     pnpm_cmds = [c for c in fake_procs.calls if c[0] in ("pnpm", "cmd")]
     assert pnpm_cmds and any(
         "store-dir" in part and "cache" in part for c in pnpm_cmds for part in c

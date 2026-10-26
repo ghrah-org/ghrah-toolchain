@@ -36,7 +36,7 @@ from pathlib import Path
 
 from ghrah_toolchain import __version__
 from ghrah_toolchain.errors import BuildError
-from ghrah_toolchain.materialize import pnpm_command
+from ghrah_toolchain.materialize import RUNTIME_PYTHON, pnpm_command
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,10 @@ def _run(
         cwd=str(cwd) if cwd is not None else None,
         capture_output=True,
         text=True,
+        # 子进程（pnpm/uv）输出 UTF-8；中文 Windows 缺省 GBK 解码会崩读线程
+        # （stderr 变 None → 报错信息丢失），显式钉 UTF-8 + 容错替换。
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if check and cp.returncode != 0:
@@ -107,6 +111,19 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _rmtree(path: Path) -> None:
+    """递归删除，兼容 Windows 长路径（MAX_PATH）。
+
+    pnpm 在源树内生成的 ``node_modules/.pnpm`` 深嵌套路径会超过 Windows
+    260 字限量，裸 ``shutil.rmtree`` 会抛 ``FileNotFoundError``(WinError 3)
+    且删不掉；Windows 下改用 ``\\\\?\\`` 扩展长度路径前缀（绝对路径）。
+    """
+    if os.name == "nt" and not str(path).startswith("\\\\?\\"):
+        shutil.rmtree("\\\\?\\" + str(Path(path).resolve()))
+    else:
+        shutil.rmtree(path)
 
 
 # ── 构建流程 ─────────────────────────────────────────────────
@@ -150,7 +167,7 @@ def build_artifacts(repo: Path, commit: str, *, out_dir: Path) -> BuildResult:
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = out_dir.parent / f"{out_dir.name}.tmp-{os.getpid()}"
     if staging.exists():
-        shutil.rmtree(staging)
+        _rmtree(staging)
     staging.mkdir(parents=True)
     try:
         result = _build_into(repo, sha, staging)
@@ -158,7 +175,10 @@ def build_artifacts(repo: Path, commit: str, *, out_dir: Path) -> BuildResult:
             out_dir.rmdir()
         os.replace(staging, out_dir)
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            _rmtree(staging)
+        except OSError:
+            shutil.rmtree(staging, ignore_errors=True)
         raise
     return replace(result, out_dir=out_dir)
 
@@ -170,7 +190,7 @@ def _build_into(repo: Path, sha: str, staging: Path) -> BuildResult:
     wheel_files = _build_wheels(src, wheels_dir)
     pins_file = _export_pins(src, wheels_dir)
     tarball_entries = _build_webui(src, tarballs_dir, staging)
-    shutil.rmtree(src)  # 产物树不含源码 checkout（纯产物）
+    _rmtree(src)  # 产物树不含源码 checkout（纯产物）
     _write_bootstrap(staging, sha)
     _write_manifest(staging, sha, wheel_files, pins_file, tarball_entries)
     return BuildResult(
@@ -391,7 +411,7 @@ def verify_artifacts(out_dir: Path) -> None:
         venv = Path(td) / "venv"
         win = os.name == "nt"
         py = venv / ("Scripts/python.exe" if win else "bin/python")
-        _run(["uv", "venv", str(venv)])
+        _run(["uv", "venv", "--python", RUNTIME_PYTHON, str(venv)])
         install = ["uv", "pip", "install", f"--python={py}"]
         install += [str(w) for w in sorted((out_dir / "wheels").glob("*.whl"))]
         install += ["-r", str(pins)]

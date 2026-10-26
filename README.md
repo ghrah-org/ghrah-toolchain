@@ -17,6 +17,15 @@ uv run python -m ghrah_toolchain --help
 
 distribution 为 `ghrah-toolchain`，Python import 为 `ghrah_toolchain`，正式 CLI 为 `ghrah`。新包不提供旧的 `ghrah-bootloader` 可执行入口或 Python import。
 
+需要写 `~/.ghrah` 的命令（`dev`／`install`／`start`）请用装好的 `ghrah`，而不要用 `uv run ghrah`：
+
+```sh
+uv tool install --editable .   # 入口 ~/.local/bin/ghrah，工具 venv 在安装域外
+ghrah --version
+```
+
+`uv run ghrah` 使用项目内 `.venv` 的解释器；在受限环境（沙箱、受控终端等）下它只能写工作区，写 `~/.ghrah` 会报 `Permission denied`——`dev` 起服失败时会直接给出这条提示。
+
 ## 检查源码组合
 
 在包含 ghrah.toml 的工作区运行：
@@ -56,6 +65,46 @@ ghrah start generic --foreground
 --foreground 显式占用当前终端，适合诊断。默认不自动打开浏览器。boot 保留为 start 的迁移别名，也采用后台语义；救援或前端开发模式须显式加 --foreground，避免无意执行交互操作。
 
 每次后台启动创建独立日志，位于 <安装域>/<实例>/logs/；Subject 输出和监督者错误均写入其中。当前尚未自动轮转日志。正常 stop 会收束子进程后再报告停止；POSIX 支持启动中取消和 SIGHUP 收束。监督者被 SIGKILL 等不可捕获方式杀死时的内核级子进程兜底尚未实现，Windows 分支尚未真机验收。
+
+## 本地开发快环（dev）
+
+dev 从**工作树**（含未提交改动）增量构建并本地起服，用于改完代码立刻看到效果。它只读写 `<安装域>/<实例>/.dev/`，不重指 `current`，也不改变 `install`／`runtime`／`start` 的既有行为。
+
+前置：该实例已安装并重指过 `current`（`create`／`install` 的产物），且 `distro.toml` 的 `[distro.repo].path` 指向有效的源码仓工作树。
+
+```sh
+ghrah dev status            # 对比工作树与上次 dev 构建，报「全量 / 增量（哪些包）」+ 会话状态
+ghrah dev run               # 构建后前台起服；已在跑则先停、回收端口，再重启
+ghrah dev run --no-restart  # 只构建／升级，不起服
+ghrah dev run --full        # 忽略指纹强制全量重建
+ghrah dev run --no-browser  # 起服但不自动打开浏览器
+ghrah dev stop              # 停止 dev 会话（收束整棵进程树）
+ghrah dev reset             # 清空 .dev（含产物），下次必然全量
+```
+
+动词沿用本仓既有词汇（`start`／`stop`）：`run` 表示"前台跑起来并监督"，`stop` 表示停止。
+`up`／`down` 保留为别名（等价于 `run`／`stop`），旧脚本无需改动。
+
+`dev run` 是**幂等**的「确保按当前工作树跑起来」：已有 dev 会话就先停止并**等端口真正释放**再起，不会出现「已在运行就跳过」的空操作，也不会因端口未回收而绑定失败。发布态会话占用同一对端口时同样会让位。
+
+`dev run` 是**前台**命令：起服后在当前终端持续监督，直到 Ctrl-C（或在另一终端执行 `ghrah dev stop`）。就绪后控制台会打印访问地址：
+
+```text
+[dev] ===== dev 环境已就绪 =====
+[dev]   前端页面  http://localhost:5173
+[dev]   后端接口  http://127.0.0.1:4112（/health、ws ws://127.0.0.1:4112/ws）
+[dev]   运行日志  <安装域>/<实例>/.dev/dev.log
+```
+
+浏览器默认自动打开同 `start`；要关掉用 `--no-browser`。Subject 与前端子进程的输出直接继承当前终端（含 uvicorn 的就绪行与请求日志），监督侧的 INFO 记录另写入 `.dev/dev.log`。
+
+增量维度是「包」：五个 Python wheel 各算一个指纹单元，依赖闭包（`pyproject.toml`／`uv.lock`／`pnpm-lock.yaml`／`pnpm-workspace.yaml`）与 webui 各算一个。只改某个 Python 包时仅重编该 wheel 并强制重装进 dev venv；依赖或 webui 变动走全量重建。首次必然全量（含 pnpm 打包，约几分钟）。
+
+dev 与发布态共用端口：起服前若存在 boot 会话会先停止它，同一时间只运行一个形态。dev 专用 venv 位于 `.dev/gen/env/.venv`，指纹基线在 `.dev/state.json`，会话 pid 在 `.dev/dev.pid`（与旧 `ghrah-bootloader` 的 dev 同路径、同格式，可直接互相接管）。
+
+代内 Python 钉 monorepo `requires-python` 的下限版本（当前 3.11），而不是工具链自身解释器：运行时闭包里的 C 扩展（httptools 等）在最新 CPython 上常无预编译 wheel，会退化成源码编译（Windows 需 MSVC）。工具链自身的 Python 版本与代内环境仍然各管各的。
+
+调试时把 `-v`／`--verbose` 放在子命令之前（`ghrah -v dev run`）。Windows 上运行中的 Python 持有 `.pyd`／`.pyc` 文件锁，因此「停旧 → 装 → 起新」的顺序不可颠倒；构建阶段可以让旧服继续跑。
 
 ## 现有产物与安装功能
 
