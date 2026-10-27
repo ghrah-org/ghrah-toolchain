@@ -199,6 +199,46 @@ def test_reused_pid_is_not_signalled(installed: Path) -> None:
     assert stop_instance("demo") == 0
 
 
+def test_clock_shift_does_not_break_supervisor_identity(installed: Path) -> None:
+    """NTP／手动校时让 boot_time 漂移后，仍应认出原监督者并真正停掉它。"""
+    start_instance("demo", no_webui=True)
+    _until(lambda: instance_status("demo")["state"] == "running")
+    record_path = installed / ".session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["created"] += 1.0  # 模拟系统时钟被校时拨后 1 秒
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    assert instance_status("demo")["state"] == "running"
+    assert stop_instance("demo", timeout=10) == 0
+    assert instance_status("demo")["state"] == "stopped"
+    assert not (installed / ".boot.pid").exists()
+
+
+def test_stop_refuses_silent_success_when_port_still_busy(installed: Path) -> None:
+    """记录里的监督者不可核对但端口仍在监听：不得报告已停止。"""
+    from ghrah_toolchain.layout import DistroToml
+
+    port = DistroToml.load(installed).subject_port
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", port))
+    listener.listen(1)
+    record = {
+        "schema": 1,
+        "token": "b" * 32,
+        "pid": 999_999_999,
+        "created": 1.0,
+        "generation": "v1",
+        "state": "running",
+    }
+    try:
+        (installed / ".session.json").write_text(json.dumps(record), encoding="utf-8")
+        with pytest.raises(ToolchainError, match="端口仍在监听"):
+            stop_instance("demo", timeout=1)
+    finally:
+        listener.close()
+        (installed / ".session.json").unlink(missing_ok=True)
+
+
 def test_log_token_cannot_escape(installed: Path) -> None:
     record = {
         "schema": 1,

@@ -16,6 +16,7 @@ import pytest
 
 from ghrah_toolchain.boot import (
     _clear_boot_pid,
+    _cmdline_is_ghrah_family,
     _write_boot_pid,
     boot_pid_path,
     stop_boot_session,
@@ -139,6 +140,24 @@ def test_stop_without_pidfile(home: Path) -> None:
     _distro_root(home)
     rc = stop_boot_session("generic")
     assert rc == 1
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "expected"),
+    [
+        # 后台监督进程的真实 argv 形态：python -m ghrah_toolchain.supervisor
+        ("/usr/bin/python3 -m ghrah_toolchain.supervisor demo " + "a" * 32, True),
+        ("/usr/bin/python3 -m ghrah_toolchain.supervisor", True),
+        ("/usr/bin/python3 -m ghrah_toolchain", True),
+        ("/usr/bin/python3 -m ghrah_bootloader", True),
+        ("/home/user/.local/bin/ghrah distro stop demo", True),
+        ("/usr/bin/python3 -m unrelated", False),
+        ("/usr/bin/python3 -c import ghrah_toolchain", False),
+        ("/usr/bin/notepad", False),
+    ],
+)
+def test_cmdline_family_guard(cmdline: str, expected: bool) -> None:
+    assert _cmdline_is_ghrah_family(cmdline) is expected
 
 
 @pytest.mark.skipif(os.name != "posix", reason="cmdline 校验仅 POSIX")

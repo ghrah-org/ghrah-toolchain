@@ -525,6 +525,25 @@ def stop_boot_session(
     return 0
 
 
+def _cmdline_is_ghrah_family(cmdline: str) -> bool:
+    """``/proc/<pid>/cmdline`` 是否属于 ghrah 工具链家族（stop 防误杀护栏）。
+
+    接受入口脚本名（``ghrah`` / ``ghrah-toolchain`` / ``ghrah-bootloader``）
+    与 ``python -m <包>[.<子模块>]`` 两种形态；后台监督进程的实际 argv 是
+    ``python -m ghrah_toolchain.supervisor``，不能只匹配顶层包名。
+    """
+    words = cmdline.split()
+    scripts = {"ghrah", "ghrah-toolchain", "ghrah-bootloader"}
+    if any(Path(word).name in scripts for word in words[:2]):
+        return True
+    for index, word in enumerate(words[:2]):
+        if word != "-m" or index + 1 >= len(words):
+            continue
+        if words[index + 1].split(".", 1)[0] in {"ghrah_toolchain", "ghrah_bootloader"}:
+            return True
+    return False
+
+
 def _stop_guard(distro: str, pid: int) -> int | None:
     """平台护栏：pid 是否仍属于 ghrah-toolchain 家族；拒绝时返回 rc=1。
 
@@ -543,16 +562,7 @@ def _stop_guard(distro: str, pid: int) -> int | None:
                 "跳过 cmdline 护栏，仅凭 pidfile 继续"
             )
             return None
-        words = cmdline.split()
-        scripts = {"ghrah", "ghrah-toolchain", "ghrah-bootloader"}
-        script_matches = any(Path(word).name in scripts for word in words[:2])
-        module_matches = any(
-            word == "-m"
-            and index + 1 < len(words)
-            and words[index + 1] in {"ghrah_toolchain", "ghrah_bootloader"}
-            for index, word in enumerate(words[:2])
-        )
-        if not script_matches and not module_matches:
+        if not _cmdline_is_ghrah_family(cmdline):
             print(
                 f"[{distro}] 拒绝：pid {pid} 的 cmdline 不属于 ghrah-toolchain（{cmdline!r}）；"
                 "请人工核查后处理"

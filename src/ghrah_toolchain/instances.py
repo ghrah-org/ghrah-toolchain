@@ -20,7 +20,13 @@ from typing import Any
 
 import psutil
 
-from ghrah_toolchain.boot import boot_pid_path, resolve_boot_target, run_boot, stop_boot_session
+from ghrah_toolchain.boot import (
+    _busy_ports,
+    boot_pid_path,
+    resolve_boot_target,
+    run_boot,
+    stop_boot_session,
+)
 from ghrah_toolchain.errors import RuntimeRefError, ToolchainError
 from ghrah_toolchain.layout import list_distros, resolve_distro_root
 from ghrah_toolchain.runtime_ref import _pid_alive, acquire_distro_lock
@@ -79,14 +85,29 @@ def _write(root: Path, record: dict[str, Any]) -> None:
         temp.unlink(missing_ok=True)
 
 
+def _argv(process: psutil.Process) -> list[str]:
+    """读取进程 argv 供身份复核；不可读时返回空列表（按“无法确认”处理）。"""
+    try:
+        return process.cmdline()
+    except psutil.Error:
+        return []
+
+
 def _process(record: dict[str, Any]) -> psutil.Process | None:
     try:
         process = psutil.Process(record["pid"])
-        if process.create_time() != record["created"]:
-            return None
         if process.status() in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
             return None
-        return process
+        if process.create_time() == record["created"]:
+            return process
+        # psutil 的 create_time 以系统时钟（boot_time + 启动 tick）为基准，
+        # NTP／手动校时会让它整体漂移，即使进程从未重启。此时以监督者
+        # argv 中的会话 token 复核身份：token 每次启动随机生成且写入记录，
+        # 被复用的无关 pid 不可能同时命中模块名与 token。
+        argv = _argv(process)
+        if "ghrah_toolchain.supervisor" in argv and record["token"] in argv:
+            return process
+        return None
     except psutil.NoSuchProcess:
         return None
     except psutil.AccessDenied as exc:
@@ -242,7 +263,10 @@ def serve_instance(name: str, token: str, *, no_webui: bool = False) -> int:
 
 
 def stop_instance(name: str, *, timeout: float = 15.0) -> int:
-    """幂等停止具名实例，核对创建时间后向监督者发信号，等待整组收束。"""
+    """幂等停止具名实例，核对身份后向监督者发信号，等待整组收束。
+
+    返回 0 前复核端口已释放；无法核对监督者但端口仍被占用时拒绝报告成功。
+    """
     if not math.isfinite(timeout) or timeout <= 0:
         raise ToolchainError("停止超时必须是有限正数")
     root = resolve_distro_root(name)
@@ -256,7 +280,17 @@ def stop_instance(name: str, *, timeout: float = 15.0) -> int:
             # 旧 pidfile 使用原有专用停止路径，不凭一个 PID 接管为新会话。
             return stop_boot_session(name, timeout=timeout)
         process = _process(record)
-        if process is None or record["state"] not in _ACTIVE:
+        if process is None:
+            # “看不见进程”不等于“已停止”：不同 PID 命名空间或监督者
+            # 异常退出留下的孤儿子进程仍可能占着端口。此时宁可报错，
+            # 也不要把仍在服务的实例报告成已停止。
+            busy = _busy_ports(root, None, None)
+            if busy:
+                raise ToolchainError(
+                    f"[{name}] 监督进程不可核对（pid={record['pid']}），但端口仍在监听: {busy}；"
+                    "可能处于不同 PID 命名空间，或监督者已退出留下孤儿子进程。"
+                    "请人工核查后处理"
+                )
             return 0
         record["state"] = "stopping"
         _write(root, record)
@@ -280,6 +314,9 @@ def stop_instance(name: str, *, timeout: float = 15.0) -> int:
         if latest and latest["token"] == record["token"]:
             latest["state"] = "stopped"
             _write(root, latest)
+    busy = _busy_ports(root, None, None)
+    if busy:
+        raise ToolchainError(f"[{name}] 监督进程已退出，但端口仍被占用: {busy}（可能有残留子进程）")
     return 0
 
 
