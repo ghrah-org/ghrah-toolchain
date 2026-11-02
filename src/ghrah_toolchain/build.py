@@ -48,14 +48,25 @@ PYTHON_PACKAGES = (
     "ghrah-taskstore",
     "ghrah-subject",
 )
-# webui 构建序 = 依赖拓扑序（protocol → plugin-registry → observer-core → observer-web）
+# webui 构建序 = 依赖拓扑序：
+#   protocol → plugin-registry → observer-core → mock-server → observer-web
+# mock-server 是测试工具（private），但必须先于 observer-web 构建：observer-web
+# 的 `vue-tsc --noEmit` 覆盖整个 ``src/**/*.ts``（含 *.spec.ts），spec 从
+# ``@ghrah/mock-server`` 取 fixture；``git archive`` 的干净检出没有 dist/（被
+# .gitignore 忽略），缺它类型检查直接 TS2307（与 webui ``scripts/build.sh`` 同序）。
 WEBUI_PACKAGES = (
     "@ghrah/protocol",
     "@ghrah/plugin-registry",
     "@ghrah/observer-core",
+    "@ghrah/mock-server",
     "@ghrah/observer-web",
 )
-WEBUI_PACK_TARBALLS = WEBUI_PACKAGES[:-1]  # observer-web 是 private，不 pack
+# 打包面 = 运行时闭包三包；observer-web 与 mock-server 均为 private，不 pack
+WEBUI_PACK_TARBALLS = (
+    "@ghrah/protocol",
+    "@ghrah/plugin-registry",
+    "@ghrah/observer-core",
+)
 OBSERVER_WEB_COPY = ("dist", "public", "locales", "package.json")
 WEBUI_ROOT_DIR = "ghrah-observer-webui"
 OBSERVER_WEB_PACKAGE_DIR = "observer-web"
@@ -98,10 +109,12 @@ def _run(
         check=False,
     )
     if check and cp.returncode != 0:
-        raise BuildError(
-            f"命令失败({cp.returncode}): {' '.join(str(c) for c in cmd)}\n"
-            f"{cp.stderr.strip()[-2000:] or cp.stdout.strip()[-2000:]}"
+        # 两路都收：pnpm 把脚本回显（$ vue-tsc ...）放 stderr、真正报错放 stdout，
+        # 只用 stderr 会把最关键的诊断信息吞掉。
+        detail = "\n".join(
+            part for part in (cp.stderr.strip()[-2000:], cp.stdout.strip()[-2000:]) if part
         )
+        raise BuildError(f"命令失败({cp.returncode}): {' '.join(str(c) for c in cmd)}\n{detail}")
     return cp
 
 
@@ -279,6 +292,8 @@ def _build_webui(src: Path, tarballs_dir: Path, staging: Path) -> list[tuple[Pat
 
     pnpm workspace 根 = 源仓根（pnpm-workspace.yaml 在 monorepo 根，非 webui
     子目录）；不用根 ``build`` 脚本（含 vscode-extension，超出运行时闭包）。
+    mock-server 只构建不打包：它是 observer-web 类型检查的 fixture 依赖
+    （spec 文件 import），不进运行时闭包。
     返回 [(tarball, name, version)]——name/version 从各包 package.json 权威读取
     （文件名解析对 ``0.2.0-alpha.0`` 类预发布版本不可靠）。
     """

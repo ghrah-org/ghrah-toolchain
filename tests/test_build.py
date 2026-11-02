@@ -455,3 +455,45 @@ class TestW4PnpmCommandForm:
 
             pytest.skip("posix 形态断言仅非 nt 平台")
         assert pnpm_command() == ["pnpm"]
+
+
+# ── webui 包清单（回归：干净检出下 observer-web 类型检查依赖 mock-server） ──
+
+
+class TestWebuiPackageLists:
+    def test_mock_server_built_before_observer_web_but_not_packed(self) -> None:
+        """observer-web 的 vue-tsc 覆盖 spec，spec import ``@ghrah/mock-server``。
+
+        干净检出（git archive）里 mock-server 没有 dist/，因此构建序必须含它、
+        且先于 observer-web；它又是 private，不进运行时 tarball 面。
+        """
+        assert "@ghrah/mock-server" in bld.WEBUI_PACKAGES
+        assert bld.WEBUI_PACKAGES.index("@ghrah/mock-server") < bld.WEBUI_PACKAGES.index(
+            "@ghrah/observer-web"
+        )
+        assert "@ghrah/mock-server" not in bld.WEBUI_PACK_TARBALLS
+        assert bld.WEBUI_PACK_TARBALLS == (
+            "@ghrah/protocol",
+            "@ghrah/plugin-registry",
+            "@ghrah/observer-core",
+        )
+
+
+def test_run_reports_stdout_diagnostics_alongside_stderr(tmp_path: Path) -> None:
+    """脚本回显在 stderr 时，stdout 中的编译错误仍应对用户可见。"""
+    import sys
+
+    script = tmp_path / "compile.py"
+    script.write_text(
+        "import sys\n"
+        "print('TS2307: missing module')\n"
+        "print('$ vue-tsc --noEmit', file=sys.stderr)\n"
+        "sys.exit(2)\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(BuildError) as error:
+        bld._run([sys.executable, str(script)])
+
+    assert "命令失败(2)" in str(error.value)
+    assert "$ vue-tsc --noEmit" in str(error.value)
+    assert "TS2307: missing module" in str(error.value)
