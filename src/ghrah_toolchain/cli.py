@@ -48,7 +48,7 @@ def _warn_legacy_data(root) -> None:
     if found:
         print(
             f"[提示] 检测到 ~/.ghrah 顶层遗留数据: {', '.join(found)}；"
-            "本次安装不会改动它们（认领: install --adopt-legacy-data）",
+            "如需将它们迁入本实例，请在安装时加上 --adopt-legacy-data",
             file=sys.stderr,
         )
 
@@ -71,6 +71,25 @@ def _short(commit: str | None) -> str:
     return commit[:7] if commit else "-"
 
 
+def _state_text(state: str) -> str:
+    return {
+        "starting": "正在启动（尚未确认启动成功）",
+        "running": "运行中（启动时检查已通过）",
+        "stopping": "正在停止",
+        "stopped": "已停止",
+        "failed": "启动或运行失败",
+        "legacy": "使用旧版方式启动，请先检查运行情况",
+    }.get(state, state)
+
+
+def _entry_text(entry) -> str:
+    if entry.kind != "generation":
+        return entry.version
+    info = read_generation(entry.path)
+    plugins = ", ".join(p.name for p in info.plugins) if info else ""
+    return f"{entry.version}（源码版本: {entry.base_version or '未知'}；插件: {plugins or '无'}）"
+
+
 # ── distro ───────────────────────────────────────────────────
 
 
@@ -83,10 +102,9 @@ def _cmd_distro_list(args: argparse.Namespace) -> int:
     boot = BootToml.load()
     distros = list_distros()
     if not distros:
-        print("（空安装域：尚无发行版）")
+        print("尚未安装任何实例。可用 ghrah distro install NAME --repo PATH 安装。")
         return 0
     entries = {(e.distro, e.version): e for e in RuntimeRefManager().list_entries()}
-    print(f"{'distro':<16} {'default':<8} versions")
     for distro in distros:
         layout = DistroLayout(root=resolve_distro_root(distro))
         versions = layout.list_versions()
@@ -103,17 +121,19 @@ def _cmd_distro_list(args: argparse.Namespace) -> int:
             f"{v}@{_short(entries.get((distro, v)).commit if entries.get((distro, v)) else None)}"
             for v in versions
         )
-        print(f"{distro:<16} {marker or '-':<8} {rendered or '-'} (current: {current})")
-        print(f"{'':<16} state: {instance_status(distro)['state']}")
+        print(f"[{distro}]{'（默认实例）' if marker else ''}")
+        print(f"  状态: {_state_text(instance_status(distro)['state'])}")
+        print(f"  当前使用: {current or '未设置'}")
+        print(f"  已构建的源码版本（@ 后为提交编号）: {rendered or '无'}")
         if gens:
             gen_rows = []
             for g in gens:
                 e = entries.get((distro, g))
                 if e is not None:
-                    gen_rows.append(e.detail)
+                    gen_rows.append(_entry_text(e))
                 else:
                     gen_rows.append(g)
-            print(f"{'':<16} {'':<8} generations: {'; '.join(gen_rows)}")
+            print(f"  可运行的安装版本: {'; '.join(gen_rows)}")
     return 0
 
 
@@ -129,12 +149,14 @@ def _cmd_install(args: argparse.Namespace) -> int:
     repo_arg = args.repo or os.environ.get("GHRAH_MONOREPO_ROOT")
     if not distro_root.is_dir() or not (distro_toml.repo_path or distro_toml.repo_url):
         if not repo_arg:
-            raise ToolchainError("首次安装需要 --repo 或 env GHRAH_MONOREPO_ROOT 指定运行时仓路径")
+            raise ToolchainError(
+                "首次安装请用 --repo/--from 指定源码仓库，或设置环境变量 GHRAH_MONOREPO_ROOT"
+            )
         from ghrah_toolchain.repository import RepositorySource
 
         location = RepositorySource.parse(repo_arg)
         if not location.remote and not Path(location.location).is_dir():
-            raise ToolchainError(f"运行时仓不存在: {location.location}")
+            raise ToolchainError(f"源码仓库不存在: {location.location}")
         rendered = render_distro_toml(
             name=distro,
             repo_path="" if location.remote else location.location,
@@ -156,7 +178,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
     validate_value("runtime.subject_port", args.subject_port)
     validate_value("runtime.webui_port", args.webui_port)
     if args.subject_port == args.webui_port:
-        raise ToolchainError("Subject 与 WebUI 端口不能相同")
+        raise ToolchainError("后端与前端端口不能相同")
     RefSource.parse(args.ref or distro_toml.ref_source)
     logging.getLogger().setLevel(logging.INFO)
     print(f"[{distro}] 开始安装，构建与依赖准备可能需要数分钟……", flush=True, file=sys.stderr)
@@ -177,7 +199,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
         )
         if not report.noop:
             print(
-                f"认领完成：数据面 {len(report.adopted)} 项 → 数据盘；"
+                f"旧数据迁移完成：{len(report.adopted)} 项已移入实例数据目录；"
                 f"归档 {len(report.archived)} 项 → {report.legacy_dir}",
                 file=sys.stderr,
             )
@@ -196,7 +218,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
             }
         )
     else:
-        print(f"已安装 {entry.label}（commit {entry.commit}），尚未启动。")
+        print(f"已安装 {entry.label}（源码提交: {entry.commit}），尚未启动。")
         print(f"下一步: ghrah distro start {distro}")
     return 0
 
@@ -218,13 +240,13 @@ def _cmd_runtime_status(args: argparse.Namespace) -> int:
     try:
         current = manager.resolve(distro)
     except RuntimeRefError as e:
-        print(f"[{distro}] 无 current（{e}）")
+        print(f"[{distro}] 未找到当前使用的安装版本（{e}）")
         current = None
     if current is not None:
-        print(f"[{distro}] current = {current.label}（commit {current.commit}）")
+        print(f"[{distro}] 当前使用: {current.label}（源码提交: {current.commit}）")
     entries = [e for e in manager.list_entries() if e.distro == distro]
     print(
-        f"[{distro}] versions = "
+        f"[{distro}] 已构建的源码版本（@ 后为提交编号）: "
         + (
             ", ".join(f"{e.version}@{_short(e.commit)}" for e in entries if e.kind == "version")
             or "（无）"
@@ -232,10 +254,10 @@ def _cmd_runtime_status(args: argparse.Namespace) -> int:
     )
     gens = [e for e in entries if e.kind == "generation"]
     if gens or layout.list_generations():
-        print(f"[{distro}] generations = " + (", ".join(e.detail for e in gens) or "（无）"))
+        print(f"[{distro}] 可运行的安装版本: " + (", ".join(_entry_text(e) for e in gens) or "无"))
     print(
-        f"[{distro}] 配置 source = {distro_toml.ref_source} gate = {distro_toml.ref_gate} "
-        f"fetch_on_update = {distro_toml.ref_fetch_on_update}"
+        f"[{distro}] 更新来源: {distro_toml.ref_source}；检查级别: {distro_toml.ref_gate}；"
+        f"更新前同步远程源码: {'是' if distro_toml.ref_fetch_on_update else '否'}"
     )
     try:
         repo = manager._resolve_repo(distro_root, distro_toml)
@@ -243,11 +265,14 @@ def _cmd_runtime_status(args: argparse.Namespace) -> int:
             RefSource.parse(distro_toml.ref_source), fetch=False, repo=repo
         )
         if current is not None and current.commit == candidate:
-            print(f"[{distro}] 候选 commit = {candidate}（已是最新，无 fetch）")
+            print(f"[{distro}] 所选源码提交: {candidate}（与当前相同；未同步远程源码）")
         else:
-            print(f"[{distro}] 候选 commit = {candidate}（落后；runtime update 前移）")
+            print(
+                f"[{distro}] 所选源码提交: {candidate}（与当前不同；"
+                f"用 ghrah distro update {distro} 更新；未同步远程源码）"
+            )
     except RuntimeRefError as e:
-        print(f"[{distro}] 候选解析失败: {e}")
+        print(f"[{distro}] 无法确定要使用的源码提交: {e}")
     lg = layout.last_good
     lg_ver = "-"
     if lg.is_symlink() or lg.exists():
@@ -255,7 +280,7 @@ def _cmd_runtime_status(args: argparse.Namespace) -> int:
             lg_ver = lg.resolve().name
         except OSError, RuntimeError:
             lg_ver = "-"
-    print(f"[{distro}] last_good = {boot.last_good!r}（符号链接 → {lg_ver}）")
+    print(f"[{distro}] 上次成功启动: {boot.last_good or '无记录'}（本实例记录: {lg_ver}）")
     return 0
 
 
@@ -266,7 +291,10 @@ def _cmd_runtime_update(args: argparse.Namespace) -> int:
     manager = RuntimeRefManager(repo=args.repo)
     if args.check:
         if args.fetch:
-            raise ToolchainError("--check 不执行 fetch，请先显式同步源仓")
+            raise ToolchainError(
+                "--check 仅比较本地记录，不能同时使用 --fetch；"
+                "如需同步远程源码，请单独执行 git fetch"
+            )
         current = manager.resolve(distro)
         candidate = manager._resolve_candidate(
             RefSource.parse(args.source or distro_toml.ref_source),
@@ -283,12 +311,17 @@ def _cmd_runtime_update(args: argparse.Namespace) -> int:
             _print_result(data)
         else:
             print(
-                f"[{distro}] current={current.commit} candidate={candidate} "
-                f"{'有可用更新' if data['update_available'] else '已是所选提交'}（未 fetch）"
+                f"[{distro}] 当前源码提交: {current.commit}；所选源码提交: {candidate}；"
+                f"{'与当前不同，可执行更新' if data['update_available'] else '已是所选提交'}"
+                "（仅比较本地记录，未同步远程源码）"
             )
         return 0
     logging.getLogger().setLevel(logging.INFO)
-    print(f"[{distro}] 开始更新（实例需停止），准备门禁与快照……", flush=True, file=sys.stderr)
+    print(
+        f"[{distro}] 开始更新（实例需停止），将检查运行环境并备份已有数据……",
+        flush=True,
+        file=sys.stderr,
+    )
     entry = manager.ensure(
         distro=distro,
         update=True,
@@ -307,7 +340,7 @@ def _cmd_runtime_update(args: argparse.Namespace) -> int:
             }
         )
     else:
-        print(f"current → {entry.label}（commit {entry.commit}），尚未启动。")
+        print(f"已切换到 {entry.label}（源码提交: {entry.commit}），尚未启动。")
     return 0
 
 
@@ -318,24 +351,24 @@ def _cmd_build(args: argparse.Namespace) -> int:
     """构建发行物：源仓候选 commit → wheels/tarballs/observer-web/manifest（不动安装域）。"""
     repo_arg = args.repo or os.environ.get("GHRAH_MONOREPO_ROOT")
     if not repo_arg:
-        raise ToolchainError("构建需要 --repo 或 env GHRAH_MONOREPO_ROOT 指定运行时仓路径")
+        raise ToolchainError("构建请用 --repo 指定源码仓库，或设置环境变量 GHRAH_MONOREPO_ROOT")
     repo = Path(repo_arg).expanduser()
     if not repo.is_dir():
-        raise ToolchainError(f"运行时仓路径不存在: {repo}")
+        raise ToolchainError(f"源码仓库路径不存在: {repo}")
     source = RefSource.parse(args.ref)
     commit = RuntimeRefManager()._resolve_candidate(source, fetch=False, repo=repo)  # noqa: SLF001
     out_dir = Path(args.out).expanduser() if args.out else repo / "dist" / "toolchain" / commit[:7]
     result = build_artifacts(repo, commit, out_dir=out_dir)
     print(f"构建完成: {result.out_dir}")
-    print(f"source_commit = {result.source_commit}")
-    print(f"wheels: {', '.join(result.wheels)}")
-    print(f"tarballs: {', '.join(result.tarballs)}")
-    print(f"pins: {result.pins_file}")
+    print(f"源码提交: {result.source_commit}")
+    print(f"Python 安装包: {', '.join(result.wheels)}")
+    print(f"前端安装包: {', '.join(result.tarballs)}")
+    print(f"依赖版本清单: {result.pins_file}")
     if args.no_verify:
         print("（已跳过验证）")
     else:
         verify_artifacts(result.out_dir)
-        print("产物验证通过（import 冒烟 + ghrah-subject-server 入口）")
+        print("构建结果检查通过（Python 包可导入，ghrah-subject-server 启动程序存在）")
     return 0
 
 
@@ -347,7 +380,7 @@ def _cmd_boot(args: argparse.Namespace) -> int:
     if args.restore_snapshot and args.ref != "last-good":
         raise ToolchainError("--restore-snapshot 需配合 --ref last-good（数据回滚救援）")
     if args.no_webui and (args.webui_dev or args.webui_dev_dir):
-        raise ToolchainError("--no-webui 与 --webui-dev/--webui-dev-dir 互斥")
+        raise ToolchainError("--no-webui 不能与 --webui-dev 或 --webui-dev-dir 同时使用")
     from ghrah_toolchain.instances import start_instance
 
     name = _instance_name(args)
@@ -400,7 +433,7 @@ def _instance_name(args: argparse.Namespace) -> str:
     positional = getattr(args, "name", None)
     optional = getattr(args, "distro", None)
     if positional and optional and positional != optional:
-        raise ToolchainError("实例位置参数与 --distro 冲突")
+        raise ToolchainError("命令中的实例名与 --distro 指定的实例名不同，请保持一致")
     name = positional or optional or _default_distro(BootToml.load())
     if not name:
         raise ToolchainError("未指定实例名称，且未配置默认实例")
@@ -412,7 +445,9 @@ def _print_state(state: dict, as_json: bool) -> None:
     if as_json:
         print(json.dumps({"schema": 1, "scope": "user", "data": state}, ensure_ascii=False))
     else:
-        print(f"[{state['name']}] {state['state']} (pid={state.get('pid', '-')})")
+        print(
+            f"[{state['name']}] {_state_text(state['state'])}（进程编号: {state.get('pid', '-')}）"
+        )
         if state.get("log"):
             print(f"日志: {state['log']}；使用 ghrah logs {state['name']} 查看")
 
@@ -425,7 +460,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
         print(json.dumps({"schema": 1, "scope": "user", "data": states}, ensure_ascii=False))
     else:
         for state in states:
-            print(f"{state['name']}\t{state['state']}\t{state.get('pid', '-')}")
+            _print_state(state, False)
     return 0
 
 
@@ -481,8 +516,14 @@ def _cmd_status(args: argparse.Namespace) -> int:
         _print_result(state)
     else:
         _print_state(state, False)
-        print(f"安装: {state['installation']}")
-        print(f"地址（配置值，未探测健康）: {state['addresses']}")
+        installation = state["installation"]
+        if installation["state"] == "ready":
+            print(f"安装版本: {installation['generation']}（源码提交: {installation['commit']}）")
+        else:
+            print(f"安装不完整: {installation['error']}")
+        print(f"前端页面: {state['addresses']['webui']}")
+        print(f"后端接口: {state['addresses']['subject']}")
+        print("以上地址来自配置，本次未检查服务是否可访问。")
         if state.get("error"):
             print(f"最近错误: {state['error']}")
     return 0
@@ -502,12 +543,18 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
     name = _instance_name(args) if args.config_scope == "distro" else None
     scope = "user" if name else "toolchain"
+    effective_labels = {
+        "next-command": "下次运行命令时生效",
+        "next-install-or-update": "下次安装或更新时生效",
+        "next-update": "下次更新时生效",
+        "next-start": "下次启动时生效",
+    }
     if args.config_action == "set":
         item = set_config(args.key, args.value, name=name)
         if args.json:
             _print_result({args.key: item}, scope)
         else:
-            print(f"已设置 {args.key} = {item['value']}（{item['effective']}）")
+            print(f"已设置 {args.key} = {item['value']}（{effective_labels[item['effective']]}）")
         return 0
     values = config_view(name)
     if args.config_action == "get":
@@ -520,7 +567,8 @@ def _cmd_config(args: argparse.Namespace) -> int:
         for key, item in values.items():
             print(
                 f"{key} = {json.dumps(item['value'], ensure_ascii=False)} "
-                f"（来源: {item['source']}；生效: {item['effective']}）"
+                f"（来源: {'默认值' if item['source'] == 'default' else item['source']}；"
+                f"{effective_labels[item['effective']]}）"
             )
     return 0
 
@@ -553,8 +601,16 @@ def _cmd_self_status(args: argparse.Namespace) -> int:
     if args.json:
         _print_result(data, "toolchain")
     else:
+        labels = {
+            "version": "工具链版本",
+            "python": "Python 解释器",
+            "prefix": "Python 环境目录",
+            "home": "实例安装目录",
+            "config": "工具链配置文件",
+            "installation": "工具链安装位置",
+        }
         for key, value in data.items():
-            print(f"{key}: {value}")
+            print(f"{labels[key]}: {value}")
     return 0
 
 
@@ -575,8 +631,8 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
             )
         )
     else:
-        print(f"静态校验通过: {manifest.path}")
-        print("未启动组件，未应用运行时绑定或 Agent 授权。")
+        print(f"配置文件检查通过: {manifest.path}")
+        print("本次仅检查配置，未启动组件或设置组件连接，也未授予 Agent 权限。")
     return 0
 
 
@@ -591,7 +647,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "源码安装依赖: "
         + ", ".join(f"{tool}={shutil.which(tool) or '缺失'}" for tool in ("git", "uv", "pnpm"))
     )
-    print(f"default={boot.default!r} fallback={boot.fallback!r} last_good={boot.last_good!r}")
+    print(f"默认启动项: {boot.default or '未设置'}")
+    print(f"备用启动项: {boot.fallback or '未设置'}")
+    print(f"上次成功启动: {boot.last_good or '无记录'}")
     manager = RuntimeRefManager()
     for distro in list_distros():
         layout = DistroLayout(root=resolve_distro_root(distro))
@@ -603,30 +661,32 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             info = read_generation(tree)
             commit = info.base_commit if info is not None else manager._tree_commit(tree)
         except OSError, RuntimeError:
-            current_target = "(current 缺失)"
-        behind = "候选不可解析"
+            current_target = "未设置（缺少 current）"
+        behind = "无法确定要使用的源码提交"
         try:
             repo = manager._resolve_repo(layout.root, distro_toml)
             candidate = manager._resolve_candidate(
                 RefSource.parse(distro_toml.ref_source), fetch=False, repo=repo
             )
             behind = (
-                "最新"
+                "与所选源码提交相同"
                 if (commit is not None and candidate == commit)
-                else (f"落后（候选 {candidate[:7]}）")
+                else (f"与所选源码提交不同（{candidate[:7]}）")
             )
         except RuntimeRefError:
             pass
         # 当前代缺身份（无 BOOTSTRAP）= 异常态
         identity_note = ""
         if commit is None:
-            identity_note = "（当前代缺 BOOTSTRAP 身份：异常态，建议重新 install）"
+            identity_note = "（无法确定已安装版本的源码提交，建议重新安装）"
         print(
-            f"[{distro}] versions={layout.list_versions() or '-'} "
-            f"generations={layout.list_generations() or '-'} "
-            f"current={current_target} commit={_short(commit)}{identity_note} "
-            f"落后情况={behind} "
-            f"subject_port={distro_toml.subject_port} webui_port={distro_toml.webui_port}"
+            f"[{distro}]\n"
+            f"  已构建的源码版本: {', '.join(layout.list_versions()) or '无'}\n"
+            f"  可运行的安装版本: {', '.join(layout.list_generations()) or '无'}\n"
+            f"  当前安装位置: {current_target}\n"
+            f"  源码提交: {_short(commit)}{identity_note}\n"
+            f"  更新检查（未同步远程源码）: {behind}\n"
+            f"  后端端口: {distro_toml.subject_port}；前端端口: {distro_toml.webui_port}"
         )
     return 0
 
@@ -637,19 +697,21 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ghrah",
-        description="ghrah 开发、组合校验与具名实例管理工具链",
+        description="ghrah 工具链：检查配置、构建源码、安装和管理实例",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="DEBUG 级日志（默认 WARNING；置于子命令之前，如 ghrah -v dev up）",
+        help="显示详细调试日志（放在子命令之前，如 ghrah -v dev run）",
     )
     subparsers = parser.add_subparsers(dest="command")
 
     for command in ("check", "metadata"):
-        manifest = subparsers.add_parser(command, help="离线校验或查询源码组合清单")
+        manifest = subparsers.add_parser(
+            command, help="检查或查看 ghrah.toml 中的组件配置（无需联网）"
+        )
         manifest.add_argument("--manifest-path", type=Path)
         manifest.add_argument("--json", action="store_true")
         manifest.set_defaults(func=_cmd_manifest)
@@ -675,35 +737,43 @@ def _build_parser() -> argparse.ArgumentParser:
         },
     )
 
-    build = subparsers.add_parser("build", help="从源仓构建发行物（wheels/tarballs/manifest）")
-    build.add_argument("--repo", help="运行时仓路径（覆盖 env GHRAH_MONOREPO_ROOT）")
-    build.add_argument("--ref", help="签出源（latest | branch:<n> | commit:<sha>），缺省 latest")
-    build.add_argument("--out", help="产物目录（缺省 <repo>/dist/toolchain/<short7>/）")
+    build = subparsers.add_parser("build", help="从源码构建 Python 和前端安装包")
+    build.add_argument("--repo", help="源码仓库路径（优先于环境变量 GHRAH_MONOREPO_ROOT）")
+    build.add_argument(
+        "--ref",
+        help="要构建的源码版本：latest、branch:<名称>、tag:<名称> 或 commit:<提交编号>；"
+        "默认 latest",
+    )
+    build.add_argument(
+        "--out", help="构建结果的保存目录（默认 <repo>/dist/toolchain/<提交编号前7位>/）"
+    )
     build.add_argument(
         "--no-verify",
         action="store_true",
-        help="跳过构建后验证（缺省构建成功即跑 import 冒烟 + 入口校验）",
+        help="跳过构建后的检查（默认检查 Python 包能否导入、启动程序是否存在）",
     )
     build.set_defaults(func=_cmd_build)
 
-    dev = subparsers.add_parser("dev", help="本地开发快环（工作树增量构建 + 本地起服）")
+    dev = subparsers.add_parser("dev", help="构建本地代码并启动开发服务")
     dev_sub = dev.add_subparsers(dest="subcommand")
-    dev_status = dev_sub.add_parser("status", help="对比工作树与上次 dev 构建，报告变更与会话状态")
-    dev_status.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
+    dev_status = dev_sub.add_parser("status", help="查看本地代码有哪些改动，以及开发服务是否运行")
+    dev_status.add_argument("--distro", help="实例名（省略时使用 boot.toml 中的默认实例）")
     dev_status.set_defaults(func=_cmd_dev)
     dev_run = dev_sub.add_parser(
-        "run", aliases=["up"], help="构建后前台起服（已在跑则先停、回收端口，再重启）"
+        "run", aliases=["up"], help="构建后在当前终端启动服务（已运行则先停止，等端口释放后重启）"
     )
-    dev_run.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
+    dev_run.add_argument("--distro", help="实例名（省略时使用 boot.toml 中的默认实例）")
     dev_run.add_argument("--no-restart", action="store_true", help="只构建/升级，不启动服务")
-    dev_run.add_argument("--full", action="store_true", help="强制全量重建（忽略增量指纹）")
+    dev_run.add_argument("--full", action="store_true", help="重新构建全部内容，即使代码没有改动")
     dev_run.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     dev_run.set_defaults(func=_cmd_dev)
-    dev_stop = dev_sub.add_parser("stop", aliases=["down"], help="停止运行中的 dev 会话")
-    dev_stop.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
+    dev_stop = dev_sub.add_parser("stop", aliases=["down"], help="停止开发服务及其相关进程")
+    dev_stop.add_argument("--distro", help="实例名（省略时使用 boot.toml 中的默认实例）")
     dev_stop.set_defaults(func=_cmd_dev)
-    dev_reset = dev_sub.add_parser("reset", help="清空 .dev 命名空间，回到未 dev 状态")
-    dev_reset.add_argument("--distro", help="发行版名（默认取 boot.toml default）")
+    dev_reset = dev_sub.add_parser(
+        "reset", help="删除 .dev 中的开发构建文件和运行环境，下次重新构建"
+    )
+    dev_reset.add_argument("--distro", help="实例名（省略时使用 boot.toml 中的默认实例）")
     dev_reset.set_defaults(func=_cmd_dev)
 
     return parser

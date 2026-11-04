@@ -227,7 +227,7 @@ def test_webui_start_missing_dir_raises(tmp_path: Path, free_port_factory) -> No
         webui_dir=tmp_path / "nope",
     )
     with patch("ghrah_toolchain.lifecycle.shutil.which", return_value="/usr/bin/pnpm"):
-        with pytest.raises(RuntimeError, match="observer-web package not found"):
+        with pytest.raises(RuntimeError, match="找不到前端源码目录 observer-web"):
             stack._start_webui()
 
 
@@ -269,7 +269,7 @@ async def test_wait_webui_port_released_warns_when_still_busy(caplog) -> None:
     with patch("ghrah_toolchain.lifecycle.port_in_use", return_value=True):
         with caplog.at_level(logging.WARNING, logger="ghrah_toolchain.lifecycle"):
             await stack._wait_webui_port_released(timeout=0.3)
-    assert any("still in use" in r.message for r in caplog.records)
+    assert any("仍被占用" in r.message for r in caplog.records)
 
 
 async def test_wait_webui_port_released_quick_when_free() -> None:
@@ -364,7 +364,7 @@ async def test_start_os_port_in_use_raises() -> None:
             StackConfig(open_browser=False, subject_port=port),
             os_command=[sys.executable, "-c", "pass"],
         )
-        with pytest.raises(RuntimeError, match="already in use"):
+        with pytest.raises(RuntimeError, match="已被占用"):
             await stack.start()
     finally:
         server.shutdown()
@@ -393,7 +393,7 @@ async def test_wait_for_server_timeout() -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    with pytest.raises(TimeoutError, match="did not become ready"):
+    with pytest.raises(TimeoutError, match="仍未就绪"):
         await wait_for_server(f"http://127.0.0.1:{port}/health", timeout=0.5, name="test")
 
 
@@ -580,7 +580,7 @@ async def test_static_webui_port_in_use_raises(tmp_path: Path) -> None:
         srv.listen(1)
         port = srv.getsockname()[1]
         stack = _make_static_stack(dist, port)
-        with pytest.raises(RuntimeError, match="already in use"):
+        with pytest.raises(RuntimeError, match="已被占用"):
             stack._start_webui_static()
 
 
@@ -599,13 +599,13 @@ def test_static_handler_ws_url_default_from_config(tmp_path: Path) -> None:
 
 def test_boot_stack_webui_dir_and_static_mutually_exclusive(tmp_path: Path) -> None:
     """BootStack：webui_dir 与 webui_static_root/webui_ws_url 互斥（同时给报错）。"""
-    with pytest.raises(RuntimeError, match="互斥"):
+    with pytest.raises(RuntimeError, match="不能.*同时使用"):
         BootStack(
             StackConfig(open_browser=False),
             webui_dir=tmp_path,
             webui_static_root=tmp_path,
         )
-    with pytest.raises(RuntimeError, match="互斥"):
+    with pytest.raises(RuntimeError, match="不能.*同时使用"):
         BootStack(
             StackConfig(open_browser=False),
             webui_dir=tmp_path,

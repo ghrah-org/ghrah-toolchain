@@ -1,10 +1,13 @@
 # ghrah-toolchain
 
 **已知的限制：**
-- `update` / `stop` 目前无法检查 Agent 是否仍在工作，可能在 Agent 循环中造成中断。
+- `stop` 目前无法检查 Agent 是否仍在工作，可能在 Agent 循环中造成中断。
 - 面向开发者的 `dev` 已可用，`create` 等其余分发命令仍在实现中。
+- 用于开发能力包组的 `ability` 子命令正在实施中
 
 九夏／ghrah 的独立工具链 CLI：提供安装与配置、源码组合的离线校验、构建，以及实例的后台启停与日志查询。
+
+> 本工具链取代已冻结的 [`ghrah-bootloader`](https://github.com/ghrah/ghrah-bootloader)。旧 `boot` / `runtime` 命令只在迁移期保留兼容语义；新脚本与文档请使用 `ghrah`。
 
 需要 Python **3.15.1 或更新版本**。推荐使用 uv 进行开发与构建；前端构建还需要 pnpm 和 Node ≥26。工具链自身的 Python 版本与被部署发行版的 Python 环境分别管理。
 
@@ -200,9 +203,11 @@ ghrah dev reset             # 清空 .dev（含产物），下次必然全量
 `dev run` 是**前台**命令：起服后在当前终端持续监督，直到 Ctrl-C（或在另一终端执行 `ghrah dev stop`）。就绪后控制台会打印访问地址：
 
 ```text
-[dev] ===== dev 环境已就绪 =====
+[dev] ===== 开发服务已就绪 =====
 [dev]   前端页面  http://localhost:5173
-[dev]   后端接口  http://127.0.0.1:4112（/health、ws ws://127.0.0.1:4112/ws）
+[dev]   后端接口  http://127.0.0.1:4112
+[dev]   服务检查  http://127.0.0.1:4112/health
+[dev]   实时连接  ws://127.0.0.1:4112/ws
 [dev]   运行日志  <安装域>/<实例>/.dev/dev.log
 ```
 

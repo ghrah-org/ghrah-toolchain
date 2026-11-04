@@ -172,7 +172,7 @@ def terminate_process(proc: subprocess.Popen[bytes]) -> None:
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        logger.warning("process group did not exit after SIGTERM, escalating to SIGKILL")
+        logger.warning("相关进程未响应停止请求，正在强制结束")
         try:
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError, PermissionError:
@@ -180,7 +180,7 @@ def terminate_process(proc: subprocess.Popen[bytes]) -> None:
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            logger.warning("process pid=%d did not exit after SIGKILL", proc.pid)
+            logger.warning("强制结束后进程仍未退出（进程编号: %d）", proc.pid)
     except Exception:
         logger.debug("process wait error", exc_info=True)
 
@@ -230,7 +230,10 @@ class BootStack:
         webui_ws_url: str | None = None,
     ) -> None:
         if webui_dir is not None and (webui_static_root is not None or webui_ws_url is not None):
-            raise RuntimeError("webui_dir 与 webui_static_root/webui_ws_url 互斥（同时给定）")
+            raise RuntimeError(
+                "前端源码目录 webui_dir 不能与已构建页面配置 "
+                "webui_static_root/webui_ws_url 同时使用"
+            )
         self._config = config
         self._os_command = os_command
         self._os_cwd = os_cwd
@@ -295,11 +298,11 @@ class BootStack:
     async def _start_os(self) -> None:
         """spawn 独立 OS 子进程（发行版 env 的 ghrah-subject-server）。"""
         if self._os_command is None:
-            raise RuntimeError("os_command 未配置：BootStack 需要 OS 启动命令")
+            raise RuntimeError("未配置后端启动命令 os_command")
         self._check_port_free(
             self._config.host,
             self._config.subject_port,
-            label="OS (subject) server",
+            label="后端服务",
         )
         env = os.environ.copy()
         if self._os_env:
@@ -313,24 +316,23 @@ class BootStack:
             start_new_session=True,
         )
         logger.info(
-            "OS subprocess starting (pid=%d, port=%d)",
+            "正在启动后端（进程编号: %d；端口: %d）",
             self._os_process.pid,
             self._config.subject_port,
         )
-        await wait_for_server(
-            self._config.subject_http_url(), timeout=10.0, name="OS (subject) server"
-        )
+        await wait_for_server(self._config.subject_http_url(), timeout=10.0, name="后端服务")
 
     # ── webui ──
 
     def _ensure_pnpm(self) -> None:
         if shutil.which("pnpm") is None:
             raise RuntimeError(
-                "pnpm not found on PATH; install pnpm or ensure Node.js toolchain "
-                "available before booting the webui."
+                "找不到 pnpm 命令；请先安装 pnpm，并确认命令所在目录已加入 PATH，再启动前端。"
             )
         if shutil.which("node") is None:
-            raise RuntimeError("node not found on PATH; install Node.js before booting the webui.")
+            raise RuntimeError(
+                "找不到 node 命令；请先安装 Node.js，并确认命令所在目录已加入 PATH，再启动前端。"
+            )
 
     def _write_webui_env_file(self, webui_dir: Path) -> None:
         env_path = webui_dir / _WEBUI_ENV_FILE
@@ -339,7 +341,9 @@ class BootStack:
             encoding="utf-8",
         )
         self._webui_env_file = env_path
-        logger.info("webui env injected: %s=%s", _WEBUI_ENV_KEY, self._config.subject_ws_url())
+        logger.info(
+            "已设置前端连接后端的地址: %s=%s", _WEBUI_ENV_KEY, self._config.subject_ws_url()
+        )
 
     def _cleanup_webui_env_file(self) -> None:
         if self._webui_env_file is not None:
@@ -354,8 +358,8 @@ class BootStack:
     def _check_port_free(self, host: str, port: int, *, label: str) -> None:
         if port_in_use(host, port):
             raise RuntimeError(
-                f"{label} port {port} already in use — an old instance is likely "
-                "still running. Stop it first, then rerun."
+                f"{label}端口 {port} 已被占用，可能是之前的实例仍在运行。"
+                "请先停止占用端口的服务后重试。"
             )
 
     async def _wait_webui_port_released(self, timeout: float = 3.0) -> None:
@@ -370,8 +374,7 @@ class BootStack:
         else:
             hint = "ss -ltnp | grep %d 或 pkill -f vite"
         logger.warning(
-            "webui port %d still in use after process group termination — "
-            "an external process may be listening (check with `%s`)",
+            "前端相关进程停止后，端口 %d 仍被占用；可能有其他进程在使用，可运行 `%s` 检查",
             self._config.webui_port,
             hint % self._config.webui_port,
         )
@@ -386,28 +389,28 @@ class BootStack:
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError(
-                    f"webui dev server exited early (code={proc.returncode}); "
-                    "common cause: port already in use (vite --strictPort) or "
-                    "pnpm install missing in observer-web package."
+                    f"前端开发服务器在启动完成前退出（退出码: {proc.returncode}）；"
+                    "请检查端口是否被占用（vite --strictPort），"
+                    "以及是否已在 observer-web 目录执行 pnpm install 安装依赖。"
                 )
             if port_in_use(self._config.host, self._config.webui_port):
-                logger.info("WebUI dev server ready on port %d", self._config.webui_port)
+                logger.info("前端开发服务器已就绪，端口: %d", self._config.webui_port)
                 return
             time.sleep(0.5)
         logger.warning(
-            "WebUI dev server not ready within %.0fs (may still be starting)",
+            "等待 %.0f 秒后前端开发服务器仍未就绪，可能还在启动，请查看日志",
             timeout,
         )
 
     def _start_webui(self) -> None:
         self._ensure_pnpm()
-        self._check_port_free(self._config.host, self._config.webui_port, label="webui")
+        self._check_port_free(self._config.host, self._config.webui_port, label="前端服务")
         webui_dir = self._webui_dir
         assert webui_dir is not None  # start() 已保证
         if not webui_dir.is_dir():
             raise RuntimeError(
-                f"observer-web package not found at {webui_dir}; "
-                "ensure ghrah-observer-webui is checked out."
+                f"找不到前端源码目录 observer-web: {webui_dir}；"
+                "请确认已下载完整的 ghrah-observer-webui 源码。"
             )
         self._write_webui_env_file(webui_dir)
         env = os.environ.copy()
@@ -435,7 +438,7 @@ class BootStack:
             **popen_kwargs,
         )
         logger.info(
-            "WebUI dev server starting (pid=%d, port=%d)",
+            "正在启动前端开发服务器（进程编号: %d；端口: %d）",
             self._webui_process.pid,
             self._config.webui_port,
         )
@@ -447,10 +450,8 @@ class BootStack:
         """静态 serve 基座产物 dist：stdlib http server + daemon 线程。"""
         root = self._webui_static_root
         if root is None or not root.is_dir():
-            raise RuntimeError(
-                f"webui static root not found at {root}; ensure the base artifacts are complete"
-            )
-        self._check_port_free(self._config.host, self._config.webui_port, label="webui")
+            raise RuntimeError(f"找不到已构建的前端页面目录: {root}；请确认构建文件完整")
+        self._check_port_free(self._config.host, self._config.webui_port, label="前端服务")
         handler = _make_static_handler(root, self._webui_ws_url or self._config.subject_ws_url())
         server = ThreadingHTTPServer((self._config.host, self._config.webui_port), handler)
         thread = threading.Thread(
@@ -463,7 +464,7 @@ class BootStack:
         thread.start()
         self._wait_static_ready()
         logger.info(
-            "WebUI static server ready (port=%d, root=%s)",
+            "前端页面服务已就绪（端口: %d；页面目录: %s）",
             self._config.webui_port,
             root,
         )
@@ -476,8 +477,7 @@ class BootStack:
                 return
             time.sleep(0.1)
         raise RuntimeError(
-            f"webui static server did not listen on port {self._config.webui_port} "
-            f"within {timeout}s"
+            f"等待 {timeout} 秒后，前端页面服务仍未监听端口 {self._config.webui_port}"
         )
 
     def _stop_webui_static(self) -> None:
@@ -499,6 +499,6 @@ class BootStack:
             import webbrowser
 
             webbrowser.open(url)
-            logger.info("Browser opened at %s", url)
+            logger.info("已请求浏览器打开 %s", url)
         except Exception:
             logger.debug("Browser open failed (non-fatal)", exc_info=True)

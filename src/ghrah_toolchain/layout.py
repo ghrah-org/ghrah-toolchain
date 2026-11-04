@@ -249,7 +249,7 @@ def resolve_distro_root(distro: str, root: Path | None = None) -> Path:
     base = root or ghrah_root()
     target = base / distro
     if not target.resolve().is_relative_to(base.resolve()):
-        raise LayoutError(f"发行版目录越出安装域: {target}")
+        raise LayoutError(f"实例目录超出了安装目录的范围: {target}")
     return target
 
 

@@ -107,7 +107,7 @@ def adopt(
     root = layout.root.parent
     markers = detect_legacy(root)
     if not markers:
-        print("顶层无遗留数据，无需认领。")
+        print("安装目录顶层没有旧数据，无需迁移。")
         return AdoptReport(noop=True)
 
     port = subject_port if subject_port is not None else distro_toml.subject_port
@@ -140,7 +140,8 @@ def _guard(layout: DistroLayout, distro_toml: DistroToml, markers: list[str], *,
     """认领守卫：端口占用 / 数据盘同名冲突 / 文件句柄在用。"""
     if port_in_use(_DEFAULT_HOST, port):
         raise AdoptError(
-            f"端口 {port} 被占用：认领要求 OS 已停止（先 ghrah-toolchain stop / Ctrl-C）"
+            f"端口 {port} 被占用：迁移旧数据前请先停止后端"
+            "（使用 ghrah stop，或在前台运行时按 Ctrl+C）"
         )
     data_root = resolve_data_root(layout, distro_toml)
     conflicts = [
@@ -149,12 +150,14 @@ def _guard(layout: DistroLayout, distro_toml: DistroToml, markers: list[str], *,
         if m in (*_DATA_PLANE_FILES, *_DATA_PLANE_DIRS) and (data_root / m).exists()
     ]
     if conflicts:
-        raise AdoptError(f"数据盘已存在同名项 {conflicts}（{data_root}）：拒绝二次认领/合并")
+        raise AdoptError(
+            f"数据目录 {data_root} 已存在同名文件或目录 {conflicts}，无法自动覆盖或合并"
+        )
     holders = _find_fd_holders(layout.root.parent, markers)
     if holders:
         raise AdoptError(
-            f"以下进程持有待移动文件的句柄（搬走 inode 会造成静默脑裂）: {holders}；"
-            "请先停止相关进程再认领"
+            f"以下进程仍在使用待迁移的文件: {holders}；此时移动文件可能导致数据不一致，"
+            "请先停止相关进程再迁移"
         )
 
 
@@ -223,11 +226,13 @@ def _move_all(
             else:
                 report.archived.append(m)
     except Exception as exc:
-        logger.error("认领移动失败（%s），逆序回搬 %d 项", exc, len(moved))
+        logger.error("旧数据迁移失败（%s），正在将已移动的 %d 项移回原处", exc, len(moved))
         for src, dst in reversed(moved):
             with contextlib.suppress(OSError):
                 os.replace(dst, src)
-        raise AdoptError(f"认领中断已回搬（{exc}）；备份保留待人工核查") from exc
+        raise AdoptError(
+            f"旧数据迁移中断（{exc}），已尝试移回原处；请人工检查，备份仍保留"
+        ) from exc
     return report
 
 
@@ -235,8 +240,8 @@ def _verify(root: Path, layout: DistroLayout, distro_toml: DistroToml, report: A
     """校验：五项标记物清零（workspace 除外）、数据面就位。"""
     remaining = detect_legacy(root)
     if remaining:
-        raise AdoptError(f"认领后顶层仍有标记物 {remaining}（不应发生，备份在 legacy/）")
+        raise AdoptError(f"迁移后安装目录顶层仍有旧数据 {remaining}，请检查（备份在 legacy/）")
     data_root = resolve_data_root(layout, distro_toml)
     missing = [m for m in report.adopted if not (data_root / m).exists()]
     if missing:
-        raise AdoptError(f"数据盘缺少已认领项 {missing}（备份在 legacy/）")
+        raise AdoptError(f"数据目录中未找到已迁移的文件或目录 {missing}（备份在 legacy/）")

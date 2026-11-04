@@ -246,7 +246,7 @@ def test_p3_build_failure_leaves_state_untouched(home: Path, repo: Path, fake_bu
     fake_build.fail["build"] = BuildError("模拟构建失败")
     mgr = _mgr(home, repo)
 
-    with pytest.raises(RuntimeRefError, match="建版本树失败"):
+    with pytest.raises(RuntimeRefError, match="构建安装文件失败"):
         mgr.ensure(distro="generic", gate="basic")
 
     layout = DistroLayout(root=home / "generic")
@@ -397,15 +397,15 @@ def test_p8_enumeration_shows_generation_and_mode(
 
     assert main(["doctor"]) == 0
     out = capsys.readouterr().out
-    assert "generations=['2026.09']" in out
+    assert "可运行的安装版本: 2026.09" in out
     assert head[:7] in out
     assert main(["runtime", "status", "--distro", "generic"]) == 0
     status_out = capsys.readouterr().out
-    assert "generations = " in status_out
-    assert "base=2026.09" in status_out
+    assert "可运行的安装版本: " in status_out
+    assert "源码版本: 2026.09" in status_out
     assert main(["distro", "list"]) == 0
     list_out = capsys.readouterr().out
-    assert "generations: 2026.09（base=2026.09 plugins=[]）" in list_out
+    assert "可运行的安装版本: 2026.09（源码版本: 2026.09；插件: 无）" in list_out
 
 
 # ── P9 代物化失败 = 什么都没发生 ──────────────────────────────

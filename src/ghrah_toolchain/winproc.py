@@ -191,7 +191,7 @@ def _verify_target(link: Path, target_abs: Path) -> None:
     resolved = link.resolve()
     if resolved != target_abs.resolve():
         raise WinProcError(
-            f"重指复核不一致: {link} 解析到 {resolved}，期望 {target_abs}（不留半切换态）"
+            f"目录链接更新后检查失败: {link} 实际指向 {resolved}，应指向 {target_abs}"
         )
 
 
@@ -219,7 +219,7 @@ def repoint_dir_link(link: Path, target_abs: Path) -> str:
     link = Path(link)
     target_abs = Path(target_abs)
     if not target_abs.is_dir():
-        raise WinProcError(f"重指目标不是目录: {target_abs}")
+        raise WinProcError(f"目录链接的目标不是目录: {target_abs}")
     tmp = link.parent / f"{link.name}.tmp-{os.getpid()}"
 
     # ① 原子：symlink + os.replace
@@ -246,4 +246,6 @@ def repoint_dir_link(link: Path, target_abs: Path) -> str:
         _verify_target(link, target_abs)
         return "junction"
     except OSError as e:
-        raise WinProcError(f"重指失败（三级回退均不可用）: {link} → {target_abs}: {e}") from e
+        raise WinProcError(
+            f"目录链接更新失败，三种可用方式均未成功: {link} → {target_abs}: {e}"
+        ) from e

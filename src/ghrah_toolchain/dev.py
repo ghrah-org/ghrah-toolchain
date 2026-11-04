@@ -285,7 +285,7 @@ def _build_wheels_subset(src: Path, wheels_dir: Path, packages: list[str]) -> li
     for pkg in packages:
         pkg_dir = src / pkg
         if not pkg_dir.is_dir():
-            raise BuildError(f"源树缺少 Python 包目录: {pkg_dir}")
+            raise BuildError(f"源码中缺少 Python 包目录: {pkg_dir}")
         _run(
             [
                 "uv",
@@ -298,7 +298,7 @@ def _build_wheels_subset(src: Path, wheels_dir: Path, packages: list[str]) -> li
         )
     wheels = sorted(wheels_dir.glob("*.whl"))
     if not wheels:
-        raise BuildError(f"未产出任何 wheel: {wheels_dir}")
+        raise BuildError(f"未生成任何 Python 安装包（.whl）: {wheels_dir}")
     return wheels
 
 
@@ -323,7 +323,9 @@ def _wheel_for(artifacts: Path, pkg: str) -> Path:
     prefix = pkg.replace("-", "_")
     matches = sorted((artifacts / "wheels").glob(f"{prefix}-*.whl"))
     if len(matches) != 1:
-        raise BuildError(f"wheel 定位失败（{pkg} → {len(matches)} 个候选）: {artifacts / 'wheels'}")
+        raise BuildError(
+            f"{pkg} 需要恰好一个 Python 安装包，但找到 {len(matches)} 个: {artifacts / 'wheels'}"
+        )
     return matches[0]
 
 
@@ -419,14 +421,15 @@ def _stop_dev_session(ctx: DevContext) -> bool:
     except OSError, ValueError:
         pid = 0
     if pid and _pid_alive(pid) is True:
-        print(f"[dev] 停止旧的 dev 会话 (pid={pid}) …", flush=True)
+        print(f"[dev] 正在停止之前的开发服务（进程编号: {pid}） …", flush=True)
         _kill_tree(pid)
         deadline = time.monotonic() + 15.0
         while _pid_alive(pid) is not False and time.monotonic() < deadline:
             time.sleep(0.2)
         if _pid_alive(pid) is not False:
             raise ToolchainError(
-                f"无法停止 dev 会话 (pid={pid})；请手动结束该进程后重试（pidfile: {pidfile}）"
+                f"无法停止开发服务（进程编号: {pid}）；请手动结束该进程后重试"
+                f"（进程记录文件: {pidfile}）"
             )
     with contextlib.suppress(OSError):
         pidfile.unlink()
@@ -454,15 +457,22 @@ def _print_access_hint(ctx: DevContext, pid: int | None = None) -> None:
     """打印访问地址／日志／停止方式（就绪与「已在运行」两条路径共用）。"""
     print(f"[dev]   前端页面  http://localhost:{ctx.toml.webui_port}", flush=True)
     print(
-        f"[dev]   后端接口  http://127.0.0.1:{ctx.toml.subject_port}"
-        f"（/health、ws ws://127.0.0.1:{ctx.toml.subject_port}/ws）",
+        f"[dev]   后端接口  http://127.0.0.1:{ctx.toml.subject_port}",
+        flush=True,
+    )
+    print(
+        f"[dev]   服务检查  http://127.0.0.1:{ctx.toml.subject_port}/health",
+        flush=True,
+    )
+    print(
+        f"[dev]   实时连接  ws://127.0.0.1:{ctx.toml.subject_port}/ws",
         flush=True,
     )
     print(f"[dev]   运行日志  {ctx.dev_root / LOGFILE}", flush=True)
     if pid:
-        print(f"[dev]   会话 pid  {pid}（停止用 ghrah dev down）", flush=True)
+        print(f"[dev]   进程编号  {pid}（使用 ghrah dev stop 停止）", flush=True)
     else:
-        print("[dev]   停止：Ctrl-C，或在另一终端运行 ghrah dev down", flush=True)
+        print("[dev]   停止：Ctrl+C，或在另一终端运行 ghrah dev stop", flush=True)
 
 
 def _wait_ports_free(ctx: DevContext, *, timeout: float = 10.0) -> None:
@@ -489,7 +499,7 @@ def _stop_release_if_running(ctx: DevContext) -> None:
     """开发态接管正式端口前：停掉正在运行的发布态会话（一次只启动一个）。"""
     if not boot_pid_path(ctx.distro_root).is_file():
         return
-    print("[dev] 发布态会话正在运行，先停止它（接管正式端口）…")
+    print("[dev] 已安装的服务正在运行，先停止它以便开发服务使用相同端口…")
     stop_boot_session(
         ctx.distro,
         subject_port=ctx.toml.subject_port,
@@ -552,34 +562,36 @@ async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
         pidfile.write_text(f"{os.getpid()}\n", encoding="utf-8")
     except OSError as exc:
         raise ToolchainError(
-            f"无法写 dev pidfile: {pidfile}（{exc}）；该目录需可写。"
+            f"无法写入开发服务的进程记录文件: {pidfile}（{exc}）；该目录需可写。"
             "若你用的是 `uv run ghrah ...`：该解释器位于工作区内，受限环境下只能写"
             "工作区，写 ~/.ghrah 会被拒——改用 `uv tool install --editable .` 装出的 "
             "`ghrah` 命令再试"
         ) from exc
     try:
         print(
-            f"[dev] 正在启动 OS 与前端（subject :{sport} / webui :{wport}）…",
+            f"[dev] 正在启动后端与前端（后端端口: {sport}；前端端口: {wport}）…",
             flush=True,
         )
         await stack.start()
         print("", flush=True)
-        print("[dev] ===== dev 环境已就绪 =====", flush=True)
+        print("[dev] ===== 开发服务已就绪 =====", flush=True)
         _print_access_hint(ctx)
-        print(f"[dev]   开发 venv {ctx.gen / 'env' / '.venv'}", flush=True)
+        print(f"[dev]   Python 环境 {ctx.gen / 'env' / '.venv'}", flush=True)
         print(
-            "[dev]   浏览器已自动打开（要关闭用 --no-browser）"
+            "[dev]   已请求浏览器打开页面，也可手动访问上面的地址（可用 --no-browser 关闭自动打开）"
             if open_browser
             else "[dev]   浏览器未打开（--no-browser）",
             flush=True,
         )
         while True:
             if stop.is_set():
-                logger.info("收到停止信号，逆序收束 dev 子进程（webui → OS）")
+                logger.info("收到停止请求，先停止前端，再停止后端")
                 return 0
             proc = stack.os_process
             if proc is not None and proc.poll() is not None:
-                logger.error("dev OS 子进程意外退出 (code=%s)，收束其余子进程", proc.returncode)
+                logger.error(
+                    "开发后端意外退出（退出码: %s），正在停止其他相关进程", proc.returncode
+                )
                 return 1
             await asyncio.sleep(0.5)
     finally:
@@ -607,28 +619,30 @@ def dev_status(ctx: DevContext) -> int:
             if state.get("units", {}).get(key) != fp[key]:
                 changed.append(key)
     if not changed:
-        print("[dev] 无变更（工作树与上次 dev 构建一致）")
+        print("[dev] 本地代码与上次开发构建一致，无需重新构建")
     else:
         deps = "deps" in changed
         py = [p for p in PYTHON_PACKAGES if p in changed]
         webui = WEBUI_UNIT in changed
         plan = (
-            "全量（依赖闭包/webui 变更或首次）"
+            "需要构建全部内容（首次构建，或依赖配置、前端代码有改动）"
             if (deps or webui or state is None)
-            else f"增量（{', '.join(py)}）"
+            else f"只需重新构建有改动的包（{', '.join(py)}）"
         )
         print(f"[dev] 检测到变更 → {plan}")
         if py:
             print(f"[dev]   Python 包: {', '.join(py)}")
         if deps:
-            print("[dev]   依赖闭包: pyproject.toml / uv.lock / pnpm-lock / pnpm-workspace")
+            print(
+                "[dev]   依赖配置: pyproject.toml / uv.lock / pnpm-lock.yaml / pnpm-workspace.yaml"
+            )
         if webui:
-            print(f"[dev]   webui: {WEBUI_UNIT}")
+            print(f"[dev]   前端代码: {WEBUI_UNIT}")
     if _dev_session_alive(ctx):
-        print("[dev] 当前有 dev 会话在运行：", flush=True)
+        print("[dev] 开发服务正在运行：", flush=True)
         _print_access_hint(ctx, _read_dev_pid(ctx))
     else:
-        print("[dev] 当前没有运行中的 dev 会话（ghrah dev up 起服）", flush=True)
+        print("[dev] 开发服务未运行，使用 ghrah dev run 启动", flush=True)
     return 0
 
 
@@ -663,17 +677,18 @@ def dev_run(
         src = work / f"src-{os.getpid()}"
 
         try:
-            print(f"[dev] 快照工作树 → {src}", flush=True)
+            print(f"[dev] 复制当前本地代码用于构建 → {src}", flush=True)
             _snapshot_worktree(ctx.repo, src)
 
             if do_full:
                 print(
-                    "[dev] 全量构建（wheels + pins + webui，含 pnpm 打包，可能数分钟）…", flush=True
+                    "[dev] 构建全部 Python 安装包、依赖版本清单和前端页面（可能需要数分钟）…",
+                    flush=True,
                 )
                 _build_full(src, artifacts)
                 rebuild_packages = list(PYTHON_PACKAGES)
             else:
-                print(f"[dev] 增量构建（{', '.join(py_changed)}）…", flush=True)
+                print(f"[dev] 只构建有改动的 Python 包（{', '.join(py_changed)}）…", flush=True)
                 _build_incremental(src, artifacts, py_changed)
                 rebuild_packages = py_changed
 
@@ -681,13 +696,13 @@ def dev_run(
             _stop_dev_session(ctx)
 
             if do_full or not _gen_ready(gen):
-                print("[dev] 全量物化 dev venv …", flush=True)
+                print("[dev] 创建开发用 Python 环境并安装全部依赖 …", flush=True)
                 _materialize_dev(ctx.distro_root, artifacts, gen)
             else:
-                print("[dev] 增量升级 dev venv …", flush=True)
+                print("[dev] 将有改动的 Python 包安装到开发环境 …", flush=True)
                 _upgrade_dev(ctx.distro_root, artifacts, gen, rebuild_packages)
 
-            print("[dev] 冒烟（import 五包 + 入口）…", flush=True)
+            print("[dev] 检查五个 Python 包能否导入，以及后端启动程序是否存在…", flush=True)
             _smoke(gen)
         finally:
             _rmtree(src) if src.exists() else None
@@ -715,7 +730,7 @@ def dev_run(
     # up 的语义是「让 dev 服务按当前工作树跑起来」：已在跑就先停、回收端口、再起。
     # 不做「已在运行就跳过」——那会让 `up` 变成不可预测的空操作。
     if _dev_session_alive(ctx):
-        print("[dev] 已有 dev 会话在运行 → 先停止再重启", flush=True)
+        print("[dev] 开发服务已在运行，将先停止再重启", flush=True)
     _stop_dev_session(ctx)
     _stop_release_if_running(ctx)
     _wait_ports_free(ctx)
@@ -724,19 +739,19 @@ def dev_run(
 
 def dev_stop(ctx: DevContext) -> int:
     if not (ctx.dev_root / DEV_PID).is_file():
-        print("[dev] dev 会话未在运行", flush=True)
+        print("[dev] 开发服务未运行", flush=True)
         return 0
     _stop_dev_session(ctx)
-    print("[dev] 已停止 dev 会话", flush=True)
+    print("[dev] 已停止开发服务", flush=True)
     return 0
 
 
 def dev_reset(ctx: DevContext) -> int:
     if ctx.dev_root.exists():
         _rmtree(ctx.dev_root)
-        print(f"[dev] 已清空 dev 命名空间: {ctx.dev_root}")
+        print(f"[dev] 已删除开发构建文件和运行环境: {ctx.dev_root}")
     else:
-        print("[dev] 无 dev 命名空间（已干净）")
+        print("[dev] 没有需要清理的开发构建文件或运行环境")
     return 0
 
 

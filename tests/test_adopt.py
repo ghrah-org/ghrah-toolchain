@@ -123,7 +123,7 @@ def test_adopt_rejects_data_plane_conflict(home: Path, free_ports: tuple[int, in
 def test_adopt_rejects_open_fd(home: Path, free_ports: tuple[int, int]) -> None:
     (home / "subject.db").write_text("db", encoding="utf-8")
     with open(home / "subject.db") as fh:  # noqa: SIM115
-        with pytest.raises(AdoptError, match="句柄"):
+        with pytest.raises(AdoptError, match="仍在使用待迁移的文件"):
             adopt(_layout(home), _toml(free_ports))
         assert fh.read(1) == "d"
 
@@ -143,7 +143,7 @@ def test_adopt_rolls_back_on_failure(
         return real_replace(src, dst, *a, **kw)
 
     monkeypatch.setattr(adopt_mod.os, "replace", flaky_replace)
-    with pytest.raises(AdoptError, match="回搬"):
+    with pytest.raises(AdoptError, match="已尝试移回原处"):
         adopt(layout, toml)
     monkeypatch.setattr(adopt_mod.os, "replace", real_replace)
     # 回搬后：顶层原样、数据盘无残留

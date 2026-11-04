@@ -146,7 +146,9 @@ def normalize_commit(repo: Path, ref: str) -> str:
     """归一化候选 ref → 完整 commit sha（``rev-parse --verify <x>^{commit}`` peel）。"""
     cp = _run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"], check=False)
     if cp.returncode != 0 or not cp.stdout.strip():
-        raise BuildError(f"候选 ref 解析失败: {ref!r}（{cp.stderr.strip() or '未知 ref'}）")
+        raise BuildError(
+            f"无法找到指定的源码版本: {ref!r}（{cp.stderr.strip() or '分支、标签或提交不存在'}）"
+        )
     return cp.stdout.strip()
 
 
@@ -176,7 +178,7 @@ def build_artifacts(repo: Path, commit: str, *, out_dir: Path) -> BuildResult:
     out_dir = Path(out_dir)
     sha = normalize_commit(repo, commit)
     if out_dir.exists() and any(out_dir.iterdir()):
-        raise BuildError(f"产物目录已存在且非空: {out_dir}（如需重建请先移除）")
+        raise BuildError(f"构建结果目录已存在且非空: {out_dir}（如需重建请先移除）")
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = out_dir.parent / f"{out_dir.name}.tmp-{os.getpid()}"
     if staging.exists():
@@ -246,7 +248,7 @@ def _build_wheels(src: Path, wheels_dir: Path) -> list[Path]:
     for pkg in PYTHON_PACKAGES:
         pkg_dir = src / pkg
         if not pkg_dir.is_dir():
-            raise BuildError(f"源树缺少 Python 包目录: {pkg_dir}")
+            raise BuildError(f"源码中缺少 Python 包目录: {pkg_dir}")
         _run(
             [
                 "uv",
@@ -259,7 +261,7 @@ def _build_wheels(src: Path, wheels_dir: Path) -> list[Path]:
         )
     wheels = sorted(wheels_dir.glob("*.whl"))
     if not wheels:
-        raise BuildError(f"未产出任何 wheel: {wheels_dir}")
+        raise BuildError(f"未生成任何 Python 安装包（.whl）: {wheels_dir}")
     return wheels
 
 
@@ -283,7 +285,7 @@ def _export_pins(src: Path, wheels_dir: Path) -> Path:
         ]
     )
     if not pins.is_file() or not pins.read_text(encoding="utf-8").strip():
-        raise BuildError(f"pin 集导出为空: {pins}")
+        raise BuildError(f"导出的依赖版本清单为空: {pins}")
     return pins
 
 
@@ -301,7 +303,7 @@ def _build_webui(src: Path, tarballs_dir: Path, staging: Path) -> list[tuple[Pat
         raise BuildError(f"源树缺少 pnpm-workspace.yaml: {src}")
     webui = src / WEBUI_ROOT_DIR
     if not webui.is_dir():
-        raise BuildError(f"源树缺少 webui 目录: {webui}")
+        raise BuildError(f"源码中缺少前端目录: {webui}")
     _run(pnpm_command() + ["install", "--frozen-lockfile"], cwd=src)
     for pkg in WEBUI_PACKAGES:
         _run(pnpm_command() + ["--filter", pkg, "run", "build"], cwd=src)
@@ -317,7 +319,7 @@ def _build_webui(src: Path, tarballs_dir: Path, staging: Path) -> list[tuple[Pat
         meta = json.loads((pkg_dir / "package.json").read_text(encoding="utf-8"))
         produced = [t for t in tarballs_dir.glob("*.tgz") if t not in [e[0] for e in entries]]
         if len(produced) != 1:
-            raise BuildError(f"pack 产物数量异常（{pkg}）: {[t.name for t in produced]}")
+            raise BuildError(f"前端安装包数量不符合预期（{pkg}）: {[t.name for t in produced]}")
         entries.append((produced[0], str(meta["name"]), str(meta["version"])))
     observer_src = webui / "packages" / OBSERVER_WEB_PACKAGE_DIR
     observer_dst = staging / "observer-web"
@@ -336,7 +338,7 @@ def _build_webui(src: Path, tarballs_dir: Path, staging: Path) -> list[tuple[Pat
         raise BuildError(f"observer-web 拷贝失败：缺少 package.json: {observer_src}")
     tarballs = entries
     if not tarballs:
-        raise BuildError(f"未产出任何 tarball: {tarballs_dir}")
+        raise BuildError(f"未生成任何前端安装包（.tgz）: {tarballs_dir}")
     return tarballs
 
 
@@ -431,9 +433,9 @@ def verify_artifacts(out_dir: Path) -> None:
             )
     pins = out_dir / manifest["python"]["pins_file"]
     if not pins.is_file():
-        raise BuildError(f"pin 集缺失: {pins}")
+        raise BuildError(f"缺少依赖版本清单: {pins}")
     if _sha256_file(pins) != manifest["python"]["pins_sha256"]:
-        raise BuildError(f"pin 集 sha256 不符: {pins}")
+        raise BuildError(f"依赖版本清单的校验值不符: {pins}")
 
     with tempfile.TemporaryDirectory(prefix="bootloader-verify-") as td:
         venv = Path(td) / "venv"
@@ -449,7 +451,7 @@ def verify_artifacts(out_dir: Path) -> None:
             f"Scripts/{VERIFY_ENTRY_POINT}.exe" if win else f"bin/{VERIFY_ENTRY_POINT}"
         )
         if not server.exists():
-            raise BuildError(f"entry point 缺失: {server}")
+            raise BuildError(f"缺少后端启动程序: {server}")
         # 入口存在性校验即可：真实入口 main() 不解析参数（--help 会直接启动
         # 服务器占端口），拉起冒烟属 boot 域验证，不在构建验证面
-    logger.info("产物验证通过: %s", out_dir)
+    logger.info("构建结果检查通过: %s", out_dir)

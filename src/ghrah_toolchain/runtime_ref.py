@@ -125,7 +125,7 @@ def acquire_distro_lock(distro_root: Path, *, stale_after: float = _STALE_LOCK_S
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             if _lock_is_stale(path, stale_after):
-                logger.warning("回收陈旧引导器锁: %s", path)
+                logger.warning("清理已失效的安装操作锁文件: %s", path)
                 with contextlib.suppress(FileNotFoundError):
                     path.unlink()
                 continue
@@ -163,9 +163,9 @@ def _repoint_link(distro_root: Path, name: str, target: str) -> None:
         try:
             strategy = winproc.repoint_dir_link(link, target_abs)
         except WinProcError as e:
-            raise RuntimeRefError(f"重指 {name} 失败: {e}") from e
+            raise RuntimeRefError(f"切换 {name} 指向的安装版本失败: {e}") from e
         if strategy != "symlink-replace":
-            logger.info("Windows 重指采用回退策略 %s: %s", strategy, link)
+            logger.info("Windows 版本链接已通过备用方式 %s 更新: %s", strategy, link)
         return
     tmp = distro_root / f"{name}.tmp-{os.getpid()}"
     if tmp.is_symlink() or tmp.exists():
@@ -207,7 +207,7 @@ class RefSource:
             if kind in ("branch", "tag", "commit") and value:
                 return cls(kind=kind, value=value)
         raise RuntimeRefError(
-            f"非法 ref 源: {raw!r}（应为 latest | branch:<n> | tag:<n> | commit:<sha>）"
+            f"源码版本格式无效: {raw!r}（应为 latest | branch:<n> | tag:<n> | commit:<sha>）"
         )
 
     def render(self) -> str:
@@ -322,7 +322,7 @@ class RuntimeRefManager:
         """安装/切换到候选 commit 并重指 ``current``（全程持锁）。"""
         require_git()
         if gate != "basic":
-            raise GateError("目前只支持 basic 门禁，full/data 尚未实现")
+            raise GateError("目前只支持 basic 基础检查，full/data 检查尚未实现")
         if version and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", version) is None:
             raise RuntimeRefError(f"非法版本名: {version!r}")
         # 实例锁覆盖构建与切换，安装域锁只覆盖共享引导菜单的提交。
@@ -346,7 +346,7 @@ class RuntimeRefManager:
                 old = self._current_entry(d)
                 if update and old is None:
                     raise RuntimeRefError(f"发行版 {d} 尚未安装；请先 ghrah distro install")
-                logger.info("[%s] 解析来源，准备构建／复用产物与运行环境", d)
+                logger.info("[%s] 确定源码版本，准备安装文件和运行环境（已有内容会尽量复用）", d)
                 return self._ensure_locked(
                     d,
                     distro_root,
@@ -426,7 +426,7 @@ class RuntimeRefManager:
             tree = distro_root / "versions" / ver
             created = not reused
             if created:
-                logger.info("[%s] 构建基座产物 %s", distro, ver)
+                logger.info("[%s] 从源码构建安装文件，版本: %s", distro, ver)
                 self._create_version_tree(distro, ver, commit, repo)
 
         return self._ensure_generation_locked(
@@ -466,7 +466,7 @@ class RuntimeRefManager:
         gen_created = not gen_dir.exists()
         try:
             if gen_created:
-                logger.info("[%s] 准备组合代环境 %s", distro, gen)
+                logger.info("[%s] 准备此安装版本的运行环境: %s", distro, gen)
                 materialize_generation(distro_root, tree, spec)
             new_entry = BootEntry(
                 distro=distro,
@@ -476,7 +476,7 @@ class RuntimeRefManager:
                 kind="generation",
                 base_version=ver,
             )
-            logger.info("[%s] 检查 %s 门禁", distro, gate)
+            logger.info("[%s] 检查运行环境（级别: %s）", distro, gate)
             self._gate(gen_dir, gate)
         except Exception:
             self._cleanup_generation(gen_created, gen_dir)
@@ -485,7 +485,7 @@ class RuntimeRefManager:
         try:
             if old is not None and old.path == new_entry.path:
                 self._sync(distro, gen)
-                logger.info("[%s] 已是所选组合代，无需切换", distro)
+                logger.info("[%s] 当前已使用所选安装版本，无需切换", distro)
                 return new_entry
             if old is not None:
                 logger.info("[%s] 保存更新前的数据快照", distro)
@@ -526,7 +526,7 @@ class RuntimeRefManager:
         """从基座产物树读 pins_sha256，组装代身份输入（插件集当前恒空）。"""
         pins = tree / "wheels" / "pins.txt"
         if not pins.is_file():
-            raise RuntimeRefError(f"基座产物树无 pins.txt: {tree}")
+            raise RuntimeRefError(f"构建结果中缺少依赖版本清单 pins.txt: {tree}")
         pins_sha256 = hashlib.sha256(pins.read_bytes()).hexdigest()
         return GenerationSpec(base_version=ver, base_commit=commit, pins_sha256=pins_sha256)
 
@@ -592,7 +592,7 @@ class RuntimeRefManager:
                 ]
             ).stdout.strip()
             if not out:
-                raise RuntimeRefError(f"仓库无 ref 可解析 latest: {repo}")
+                raise RuntimeRefError(f"仓库中没有可用于 latest 的分支或标签: {repo}")
             sha = out.splitlines()[0].strip()
         else:
             sha = source.value or ""
@@ -614,7 +614,8 @@ class RuntimeRefManager:
         )
         if cp.returncode != 0 or not cp.stdout.strip():
             raise RuntimeRefError(
-                f"候选 ref 解析失败: {source.render()}（{cp.stderr.strip() or '未知 ref'}）"
+                f"无法找到指定的源码版本: {source.render()}"
+                f"（{cp.stderr.strip() or '分支、标签或提交不存在'}）"
             )
         return cp.stdout.strip()
 
@@ -625,7 +626,7 @@ class RuntimeRefManager:
             ["git", "-C", str(repo), "show", "-s", "--format=%cd", "--date=format:%Y.%m", commit]
         ).stdout.strip()
         if not out:
-            raise RuntimeRefError(f"无法读取候选提交日期: {commit}")
+            raise RuntimeRefError(f"无法读取所选源码提交的日期: {commit}")
         return out
 
     def _claim_version_name(
@@ -669,13 +670,13 @@ class RuntimeRefManager:
         if tree.exists():
             if self._version_identity(tree) == commit:
                 return tree
-            raise RuntimeRefError(f"版本目录已存在且 commit 不同: {tree}")
+            raise RuntimeRefError(f"版本目录已存在，但记录的源码提交不同: {tree}")
         # 物化即构建：staging 隔离 + os.replace 原子落位；
         # 失败时 staging 清理、目标不存在——「失败 = 什么都没发生」。
         try:
             build_artifacts(repo, commit, out_dir=tree)
         except ToolchainError as e:
-            raise RuntimeRefError(f"建版本树失败 {ver}: {e}") from e
+            raise RuntimeRefError(f"构建安装文件失败 {ver}: {e}") from e
         return tree
 
     def _cleanup_tree(self, created: bool, tree: Path) -> None:
@@ -724,7 +725,7 @@ class RuntimeRefManager:
             return "generation", ""
         raise RuntimeRefError(
             f"current 指向 generations/ 之外的路径: {tree}"
-            "（引导目标只允许组合代；versions/ 为基座产物库，不可引导）"
+            "（只能从 generations/ 中的已安装环境启动；versions/ 只保存构建文件，不能直接启动）"
         )
 
     # ── 门禁 ──
@@ -736,13 +737,13 @@ class RuntimeRefManager:
         任何发行版级 ``env/`。
         """
         if level in ("full", "data"):
-            raise GateError(f"门禁级别 {level} 未启用（尚未实现）")
+            raise GateError(f"检查级别 {level} 尚未实现，请使用 basic")
         if level != "basic":
-            raise GateError(f"未知门禁级别: {level}（应为 basic | full | data）")
+            raise GateError(f"未知检查级别: {level}（应为 basic | full | data）")
         try:
             self._gate_generation(gen_dir)
         except ToolchainError as e:
-            raise GateError(f"门禁 basic 未通过（代冒烟失败）: {e}") from e
+            raise GateError(f"基础检查未通过，运行环境不可用: {e}") from e
         return "passed"
 
     def _gate_generation(self, gen_dir: Path) -> None:
@@ -754,7 +755,7 @@ class RuntimeRefManager:
         venv = gen_dir / "env" / ".venv"
         py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         if not py.is_file():
-            raise GateError(f"代 env 解释器缺失: {py}（代未完整物化）")
+            raise GateError(f"运行环境中缺少 Python 解释器: {py}（安装不完整，请重新安装）")
         cp = self._run(
             [
                 str(py),
@@ -765,13 +766,14 @@ class RuntimeRefManager:
         )
         if cp.returncode != 0:
             raise GateError(
-                f"代 env import 冒烟失败: {cp.stderr.strip()[-800:] or cp.stdout.strip()[-800:]}"
+                "运行环境中的 Python 包无法导入: "
+                f"{cp.stderr.strip()[-800:] or cp.stdout.strip()[-800:]}"
             )
         sub = "Scripts" if os.name == "nt" else "bin"
         suffix = ".exe" if os.name == "nt" else ""
         server = venv / sub / f"ghrah-subject-server{suffix}"
         if not server.is_file():
-            raise GateError(f"代 env 缺少 ghrah-subject-server 入口: {server}")
+            raise GateError(f"运行环境中缺少后端启动程序 ghrah-subject-server: {server}")
 
     # ── 快照（委托 snapshot 模块） ──
 
@@ -811,7 +813,7 @@ class RuntimeRefManager:
         gen_dir = self._root / distro / "generations" / ver
         info = read_generation(gen_dir)
         if info is None:
-            raise RuntimeRefError(f"代缺失或不可读: {gen_dir}（先完成 install）")
+            raise RuntimeRefError(f"安装版本目录缺失或不可读: {gen_dir}（请先完成安装）")
         base_tree = self._root / distro / "versions" / info.base_version
         spec = GenerationSpec(
             base_version=info.base_version,
@@ -825,7 +827,7 @@ class RuntimeRefManager:
             and generation_complete(gen_dir)
         )
         if not consistent:
-            logger.warning("代指纹/完整性不达标，重建物化: %s", gen_dir)
+            logger.warning("运行环境与安装记录不符或文件不完整，正在重新创建: %s", gen_dir)
             materialize_generation(self._root / distro, base_tree, spec, rebuild=True)
 
     # ── boot.toml 写入与回退 ──
@@ -856,7 +858,7 @@ class RuntimeRefManager:
         self, old: BootEntry | None, new: BootEntry, source: RefSource, gate: str
     ) -> None:
         logger.info(
-            "版本变更: %s → %s (commit=%s source=%s gate=%s)",
+            "安装版本已切换: %s → %s（源码提交: %s；更新来源: %s；检查级别: %s）",
             old.label if old is not None else "∅",
             new.label,
             new.commit,
@@ -867,8 +869,8 @@ class RuntimeRefManager:
     def _guard_not_running(self, distro_toml: DistroToml) -> None:
         if port_in_use(DEFAULT_HOST, distro_toml.subject_port):
             raise RuntimeRefError(
-                f"端口 {distro_toml.subject_port} 被占用（OS 运行中？）——"
-                "冷切换要求先执行 ghrah distro stop NAME"
+                f"端口 {distro_toml.subject_port} 被占用（后端可能仍在运行）；"
+                "切换安装版本前请先执行 ghrah distro stop NAME 停止实例"
             )
 
     # ── 子进程统一入口（便于测试 monkeypatch） ──

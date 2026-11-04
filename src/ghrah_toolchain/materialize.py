@@ -277,7 +277,7 @@ def materialize_generation(
             and existing.fingerprint == fingerprint
             and generation_complete(gen_dir)
         ):
-            logger.info("组合代复用（零物化）: %s", gen_dir)
+            logger.info("使用已有运行环境，无需重新安装: %s", gen_dir)
             return MaterializeResult(gen_dir=gen_dir, gen_id=spec.gen_id(), fingerprint=fingerprint)
     if gen_dir.exists():
         shutil.rmtree(gen_dir)  # 重建路径：旧代整体移除后经 staging 重建
@@ -306,7 +306,8 @@ def _materialize_into(
     if pins_sha256 != spec.pins_sha256:
         expected = spec.pins_sha256[:12]
         raise MaterializeError(
-            f"基座 pins_sha256 与代声明不符: {base_tree}（{pins_sha256[:12]}… != {expected}…）"
+            f"构建文件中的依赖清单校验值与安装记录不符: {base_tree}"
+            f"（{pins_sha256[:12]}… != {expected}…）"
         )
     _install_python_env(distro_root, base_tree, staging / "env" / ".venv")
     _install_webui_env(distro_root, base_tree, manifest, staging / "env" / "node")
@@ -320,11 +321,11 @@ def _materialize_into(
 def _read_base_manifest(base_tree: Path) -> dict:
     manifest_path = base_tree / "manifest.json"
     if not manifest_path.is_file():
-        raise MaterializeError(f"基座产物树缺少 manifest.json: {base_tree}")
+        raise MaterializeError(f"构建结果中缺少文件清单 manifest.json: {base_tree}")
     try:
         return json.loads(manifest_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        raise MaterializeError(f"基座 manifest.json 不可读: {manifest_path}: {e}") from e
+        raise MaterializeError(f"无法读取构建文件清单 manifest.json: {manifest_path}: {e}") from e
 
 
 def _uv_env(distro_root: Path) -> dict[str, str]:
@@ -353,10 +354,10 @@ def _install_python_env(
     """
     wheels = sorted((base_tree / "wheels").glob("*.whl"))
     if not wheels:
-        raise MaterializeError(f"基座产物树无 wheels: {base_tree}")
+        raise MaterializeError(f"构建结果中缺少 Python 安装包（wheels）: {base_tree}")
     pins = base_tree / "wheels" / "pins.txt"
     if not pins.is_file():
-        raise MaterializeError(f"基座产物树无 pins.txt: {base_tree}")
+        raise MaterializeError(f"构建结果中缺少依赖版本清单 pins.txt: {base_tree}")
     request = python or runtime_python(_read_base_manifest(base_tree))
     _run(
         ["uv", "venv", "--relocatable", "--python", request, str(venv)],
@@ -383,12 +384,12 @@ def _install_webui_env(distro_root: Path, base_tree: Path, manifest: dict, node_
     node_dir.mkdir(parents=True)
     observer = base_tree / "observer-web"
     if not (observer / "package.json").is_file():
-        raise MaterializeError(f"基座 observer-web 缺失: {observer}")
+        raise MaterializeError(f"构建结果中缺少前端页面目录 observer-web: {observer}")
     overrides: dict[str, str] = {}
     for entry in manifest["web"]["tarballs"]:
         tarball = base_tree / entry["file"]
         if not tarball.is_file():
-            raise MaterializeError(f"基座 tarball 缺失: {tarball}")
+            raise MaterializeError(f"构建结果中缺少前端安装包: {tarball}")
         rel = os.path.relpath(tarball, node_dir)
         overrides[str(entry["name"])] = f"file:{rel}"
     rel_observer = os.path.relpath(observer, node_dir)
@@ -417,4 +418,4 @@ def _install_webui_env(distro_root: Path, base_tree: Path, manifest: dict, node_
     ]
     _run(cmd, cwd=node_dir)
     if not (node_dir / "node_modules").is_dir():
-        raise MaterializeError(f"pnpm install 未物化 node_modules: {node_dir}")
+        raise MaterializeError(f"pnpm install 完成后仍未找到前端依赖目录 node_modules: {node_dir}")

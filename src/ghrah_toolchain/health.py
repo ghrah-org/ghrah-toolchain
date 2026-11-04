@@ -18,7 +18,7 @@ _POLL_INTERVAL = 0.5
 _REQUEST_TIMEOUT = 2.0
 
 
-async def wait_for_server(url: str, timeout: float = 15.0, name: str = "Server") -> dict:
+async def wait_for_server(url: str, timeout: float = 15.0, name: str = "服务") -> dict:
     """轮询 HTTP 健康端点直到就绪或超时。
 
     Args:
@@ -38,22 +38,20 @@ async def wait_for_server(url: str, timeout: float = 15.0, name: str = "Server")
     while time.monotonic() < deadline:
         try:
             data = fetch_health(url)
-            logger.info("%s is ready: %s", name, data)
+            logger.info("%s已就绪，检查结果: %s", name, data)
             return data
         except Exception as e:  # noqa: BLE001 - 轮询需吞掉瞬时网络错误
             last_exc = e
             await _sleep(_POLL_INTERVAL)
 
-    raise TimeoutError(
-        f"{name} at {url} did not become ready within {timeout}s. Last error: {last_exc}"
-    )
+    raise TimeoutError(f"等待 {timeout} 秒后{name}仍未就绪（地址: {url}）；最近错误: {last_exc}")
 
 
 def fetch_health(url: str) -> dict:
     """单次请求健康端点，返回 JSON 对象；非 200 或解析失败抛异常。"""
     with urllib.request.urlopen(url, timeout=_REQUEST_TIMEOUT) as resp:  # noqa: S310
         if resp.status != 200:
-            raise RuntimeError(f"health endpoint returned {resp.status}")
+            raise RuntimeError(f"服务检查请求返回 HTTP {resp.status}")
         return json.loads(resp.read().decode("utf-8"))
 
 

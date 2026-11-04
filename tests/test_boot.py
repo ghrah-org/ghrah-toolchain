@@ -184,7 +184,7 @@ def test_os_server_command_missing_binary(tmp_path: Path) -> None:
     from ghrah_toolchain.errors import ToolchainError
 
     layout = DistroLayout(root=tmp_path)
-    with pytest.raises(ToolchainError, match="入口缺失"):
+    with pytest.raises(ToolchainError, match="启动程序缺失"):
         os_server_command(layout.root / "env" / ".venv")
 
 
@@ -575,7 +575,7 @@ def test_resolve_os_server_missing_raises(tmp_path: Path) -> None:
 
     layout = _make_gen(tmp_path)
     _server_entry(layout.current / "env" / ".venv").unlink()
-    with pytest.raises(ToolchainError, match="当前代 env 未物化"):
+    with pytest.raises(ToolchainError, match="当前版本的运行环境尚未准备好"):
         resolve_os_server(layout)
 
 
@@ -672,7 +672,7 @@ def test_webui_static_root_missing_dist_fail_closed(tmp_path: Path) -> None:
 
     _make_gen(tmp_path)  # 基座树在场但无 observer-web/dist
     target = resolve_boot_target("generic", None, root=tmp_path)
-    with pytest.raises(ToolchainError, match="基座产物不完整"):
+    with pytest.raises(ToolchainError, match="前端构建文件不完整"):
         webui_static_root(target)
 
 
@@ -685,7 +685,7 @@ def test_webui_static_root_non_gen_rejected(tmp_path: Path) -> None:
     # 去掉代的 GENERATION.toml，使 read_generation 不命中
     (tmp_path / "generic" / "generations" / "2026.09" / "GENERATION.toml").unlink()
     target = resolve_boot_target("generic", None, root=tmp_path)
-    with pytest.raises(ToolchainError, match="不是组合代"):
+    with pytest.raises(ToolchainError, match="不是已安装的运行环境"):
         webui_static_root(target)
 
 

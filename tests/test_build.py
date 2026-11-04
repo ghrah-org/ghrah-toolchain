@@ -291,7 +291,7 @@ class TestBuildArtifacts:
         sha = normalize_commit(fake_repo, "HEAD")
         expected = fake_repo / "dist" / "toolchain" / sha[:7]
         assert (expected / "manifest.json").is_file()
-        assert "产物验证通过" in capsys.readouterr().out
+        assert "构建结果检查通过" in capsys.readouterr().out
         # 非法 ref → ToolchainError → rc=1、无产物
         rc2 = main(
             [

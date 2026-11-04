@@ -269,7 +269,7 @@ def test_m4b_pins_mismatch_rejected(tmp_path: Path, fake_procs) -> None:
     base_tree = distro_root / "versions" / "2026.09"
     _materialize_base(base_tree)
     bad = GenerationSpec(base_version="2026.09", base_commit="a" * 40, pins_sha256="d" * 64)
-    with pytest.raises(MaterializeError, match="pins_sha256 与代声明不符"):
+    with pytest.raises(MaterializeError, match="依赖清单校验值与安装记录不符"):
         materialize_generation(distro_root, base_tree, bad)
     assert not (distro_root / "generations" / "2026.09").exists()
 

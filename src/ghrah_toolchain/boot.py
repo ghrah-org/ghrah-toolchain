@@ -97,12 +97,14 @@ def _write_boot_pid(distro_root: Path) -> None:
         alive = _pid_alive(old)
         if alive is None:
             raise ToolchainError(
-                f"无法探测旧 boot 会话 pid={old} 是否存活 ({path})；"
-                "请人工确认无会话运行后删除该文件再试"
+                f"无法确认之前启动的进程是否仍在运行（进程编号: {old}；记录文件: {path}）；"
+                "请人工确认服务已停止后删除该文件再试"
             )
         if alive:
-            raise ToolchainError(f"已有 boot 会话在运行 (pid={old}, {path})；请先 ghrah stop")
-        logger.warning("回收陈旧 boot pidfile: %s (pid=%s)", path, old)
+            raise ToolchainError(
+                f"服务已在运行（进程编号: {old}；记录文件: {path}）；请先 ghrah stop"
+            )
+        logger.warning("清理已退出进程的记录文件: %s（进程编号: %s）", path, old)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{os.getpid()}\n", encoding="utf-8")
 
@@ -145,7 +147,7 @@ def os_server_command(venv: Path) -> list[str]:
     """OS 进程命令：给定 venv 的 ``ghrah-subject-server`` 入口（纯 venv→命令助手）。"""
     server = os_server_entry(venv)
     if not server.is_file():
-        raise ToolchainError(f"OS server 入口缺失: {server}（发行版 env 未物化，请先完成安装）")
+        raise ToolchainError(f"后端启动程序缺失: {server}（运行环境尚未准备好，请先完成安装）")
     return [str(server)]
 
 
@@ -158,7 +160,9 @@ def resolve_os_server(layout: DistroLayout) -> list[str]:
     gen_venv = layout.current / "env" / ".venv"
     if os_server_entry(gen_venv).is_file():
         return os_server_command(gen_venv)
-    raise ToolchainError(f"OS server 入口缺失: {gen_venv}（当前代 env 未物化，请先完成安装）")
+    raise ToolchainError(
+        f"后端启动程序缺失: {gen_venv}（当前版本的运行环境尚未准备好，请先完成安装）"
+    )
 
 
 def webui_static_root(target: BootTarget) -> Path:
@@ -169,11 +173,13 @@ def webui_static_root(target: BootTarget) -> Path:
     """
     info = read_generation(target.tree)
     if info is None:
-        raise ToolchainError(f"引导目标不是组合代: {target.tree}（current 只指向 generations/）")
+        raise ToolchainError(
+            f"目标目录不是已安装的运行环境: {target.tree}（current 只指向 generations/）"
+        )
     dist = target.layout.versions / info.base_version / "observer-web" / "dist"
     if not dist.is_dir():
         raise ToolchainError(
-            f"基座产物不完整: {dist} 缺失（observer-web dist）；重新 install 修复基座树"
+            f"前端构建文件不完整: 缺少 {dist}；请重新执行 ghrah distro install 安装"
         )
     return dist
 
@@ -184,8 +190,7 @@ def webui_dev_dir(target: BootTarget, dev_dir_arg: str | Path | None) -> Path:
         dev_dir = Path(dev_dir_arg).expanduser()
         if not dev_dir.is_dir():
             raise ToolchainError(
-                f"--webui-dev-dir 无效: {dev_dir} 不是目录；"
-                "应指向开发域源码树的 observer-web 包目录"
+                f"--webui-dev-dir 无效: {dev_dir} 不是目录；应指向本地源码中的 observer-web 目录"
             )
         return dev_dir
     repo_path = target.distro_toml.repo_path
@@ -194,8 +199,8 @@ def webui_dev_dir(target: BootTarget, dev_dir_arg: str | Path | None) -> Path:
         if dev_dir.is_dir():
             return dev_dir
     raise ToolchainError(
-        "开发域路径不可用：提供 --webui-dev-dir（开发域源码树的 observer-web 包目录），"
-        "或在 distro.toml [distro.repo].path 配置有效源仓路径"
+        "找不到前端开发源码：请用 --webui-dev-dir 指定本地 observer-web 目录，"
+        "或在 distro.toml 的 [distro.repo].path 中填写有效的本地源码仓库路径"
     )
 
 
@@ -245,7 +250,7 @@ def resolve_boot_target(
     else:
         if not layout.current.exists():
             raise ToolchainError(
-                f"current 未指向任何版本: {layout.current}（先安装发行版并重指 current）"
+                f"current 未指向任何版本: {layout.current}（请先安装并选择要使用的版本）"
             )
         tree = layout.current.resolve()
         if not _within_managed_segment(layout, tree):
@@ -254,11 +259,11 @@ def resolve_boot_target(
         if version_arg and version_arg != version:
             raise ToolchainError(
                 f"--version {version_arg} 与 current 指向的 {version} 不一致；"
-                "版本切换由 install / runtime update 承载（boot 不做重指）"
+                "请用 ghrah distro install 或 ghrah distro update 切换版本后再启动"
             )
     if boot.default and boot.default != f"{distro}/{version}":
         logger.warning(
-            "boot.toml default=%s 与引导目标 %s 不一致，按目标引导",
+            "boot.toml 中的默认启动项 %s 与本次指定版本 %s 不一致，将启动本次指定的版本",
             boot.default,
             version,
         )
@@ -331,7 +336,7 @@ async def run_boot(
         # （OS cwd / webui / 自管 .pth 均经 current 段生效）
         with acquire_distro_lock(target.layout.root):
             repoint_current(target.layout.root, target.version)
-        logger.info("救援重指 current → generations/%s", target.version)
+        logger.info("恢复启动：已将当前安装版本切换到 generations/%s", target.version)
     data_root = resolve_data_root(target.layout, target.distro_toml)
     ensure_data_dirs(data_root)
     sport = subject_port if subject_port is not None else target.distro_toml.subject_port
@@ -363,7 +368,7 @@ async def run_boot(
         **webui_kwargs,
     )
     logger.info(
-        "boot %s @ %s (tree=%s data=%s os_port=%d)",
+        "正在启动 %s，版本 %s（安装位置: %s；数据目录: %s；后端端口: %d）",
         target.distro,
         target.version,
         target.tree,
@@ -401,18 +406,22 @@ async def run_boot(
         try:
             _update_last_good(target)
         except Exception:
-            logger.warning("last-good 更新失败（不阻断启动）", exc_info=True)
+            logger.warning("无法保存本次成功启动的版本记录，服务继续启动", exc_info=True)
         while True:
             if stop.is_set():
-                logger.info("停止信号收到，逆序收束子进程（webui → OS）")
+                logger.info("收到停止请求，先停止前端，再停止后端")
                 return 0
             proc = stack.os_process
             if proc is not None and proc.poll() is not None:
-                logger.error("OS 子进程意外退出 (code=%s)，收束其余子进程", proc.returncode)
+                logger.error(
+                    "后端进程意外退出（退出码: %s），正在停止其他相关进程", proc.returncode
+                )
                 return 1
             frontend = getattr(stack, "webui_process", None)
             if frontend is not None and frontend.poll() is not None:
-                logger.error("前端子进程异常退出 (code=%s)，收束全栈", frontend.returncode)
+                logger.error(
+                    "前端进程异常退出（退出码: %s），正在停止其他相关进程", frontend.returncode
+                )
                 return 1
             await asyncio.sleep(_SUPERVISOR_POLL_SECONDS)
     finally:
@@ -442,15 +451,15 @@ def _perform_snapshot_restore(target: BootTarget, *, yes: bool) -> None:
             if not sys.stdin.isatty():
                 raise ToolchainError("非交互环境：--restore-snapshot 需配合 --yes")
             answer = input(
-                f"将恢复快照 {latest.name} 并重指 current 到 {target.version}；"
-                "快照之后的写入窗口将丢失。确认恢复？[y/N] "
+                f"将恢复数据备份 {latest.name}，并将当前安装版本切换到 {target.version}；"
+                "备份之后的所有数据改动都将丢失。确认恢复？[y/N] "
             )
             if answer.strip().lower() not in ("y", "yes"):
                 raise ToolchainError("已取消快照恢复")
         restored = snapshot.restore(target.layout, target.distro_toml, latest)
-        logger.info("快照已恢复: %s（数据回到旧版本 %s 方向）", latest.name, restored or "未知")
+        logger.info("数据备份已恢复: %s（备份时的安装版本: %s）", latest.name, restored or "未知")
     repoint_current(distro_root, target.version)
-    logger.info("救援重指 current → generations/%s", target.version)
+    logger.info("恢复启动：已将当前安装版本切换到 generations/%s", target.version)
 
 
 def _update_last_good(target: BootTarget) -> None:
@@ -490,23 +499,23 @@ def stop_boot_session(
     distro_root = root / distro
     pidfile = boot_pid_path(distro_root)
     if not pidfile.is_file():
-        print(f"[{distro}] 无 boot pidfile（未在运行）")
+        print(f"[{distro}] 没有启动进程记录（未在运行）")
         return 1
     try:
         pid = int(pidfile.read_text(encoding="utf-8").strip() or "0")
     except (OSError, ValueError) as e:
-        raise ToolchainError(f"boot pidfile 损坏: {pidfile}: {e}") from e
+        raise ToolchainError(f"启动进程记录文件损坏: {pidfile}: {e}") from e
     if _session_exited(pid):
         with contextlib.suppress(OSError):
             pidfile.unlink()
-        print(f"[{distro}] boot 会话已不在运行（清理陈旧 pidfile，pid={pid}）")
+        print(f"[{distro}] 服务已不在运行，已清理旧进程记录（进程编号: {pid}）")
         return 1
     _stop_guard_rc = _stop_guard(distro, pid)
     if _stop_guard_rc is not None:
         return _stop_guard_rc
     if os.name == "nt":
         return _stop_windows(distro, distro_root, pid, timeout, subject_port, webui_port)
-    print(f"[{distro}] 向 boot 会话 pid={pid} 发送 SIGTERM（逆序收束 webui → OS）")
+    print(f"[{distro}] 向启动进程 {pid} 发送停止请求（先停止前端，再停止后端）")
     os.kill(pid, _signal.SIGTERM)
     deadline = _time.monotonic() + timeout
     while not _session_exited(pid):
@@ -521,7 +530,7 @@ def stop_boot_session(
     if ports_busy:
         print(f"[{distro}] 会话已退出，但端口仍被占用: {ports_busy}（可能是残留子进程）")
         return 2
-    print(f"[{distro}] boot 会话已停止，端口已释放")
+    print(f"[{distro}] 服务已停止，端口已释放")
     return 0
 
 
@@ -559,12 +568,12 @@ def _stop_guard(distro: str, pid: int) -> int | None:
         if cmdline is None:
             print(
                 f"[{distro}] 告警：无法读取 /proc/{pid}/cmdline，"
-                "跳过 cmdline 护栏，仅凭 pidfile 继续"
+                "无法核对启动命令，将按进程记录文件继续停止操作"
             )
             return None
         if not _cmdline_is_ghrah_family(cmdline):
             print(
-                f"[{distro}] 拒绝：pid {pid} 的 cmdline 不属于 ghrah-toolchain（{cmdline!r}）；"
+                f"[{distro}] 无法停止：进程 {pid} 的启动命令不属于 ghrah-toolchain（{cmdline!r}）；"
                 "请人工核查后处理"
             )
             return 1
@@ -573,9 +582,7 @@ def _stop_guard(distro: str, pid: int) -> int | None:
 
     image = winproc.process_image(pid)
     if image is None:
-        print(
-            f"[{distro}] 告警：无法查询 pid {pid} 的进程映像名，跳过映像名护栏，仅凭 pidfile 继续"
-        )
+        print(f"[{distro}] 警告：无法查询进程 {pid} 的程序名称，将按进程记录文件继续停止操作")
         return None
     base = image.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].lower()
     if (
@@ -583,7 +590,7 @@ def _stop_guard(distro: str, pid: int) -> int | None:
         and "python" not in base
     ):
         print(
-            f"[{distro}] 拒绝：pid {pid} 的映像名不属于 ghrah-toolchain 家族"
+            f"[{distro}] 无法停止：进程 {pid} 的程序名称不属于 ghrah-toolchain"
             f"（{image}）；请人工核查后处理"
         )
         return 1
@@ -618,7 +625,7 @@ def _stop_windows(
     """
     import time as _time
 
-    print(f"[{distro}] 向 boot 会话 pid={pid} 发送 taskkill（优雅，超时升级 /F /T）")
+    print(f"[{distro}] 请求停止启动进程 {pid}（taskkill）；超时后将强制结束它及其相关进程")
     _taskkill(pid, force=False)
     deadline = _time.monotonic() + timeout
     while not _session_exited(pid):
@@ -627,13 +634,16 @@ def _stop_windows(
         _time.sleep(0.2)
     if _session_exited(pid):
         return _stop_ports_check(distro, distro_root, subject_port, webui_port)
-    print(f"[{distro}] 优雅终止超时（{timeout}s），升级强杀: taskkill /F /T /PID {pid}")
+    print(
+        f"[{distro}] 等待停止超时（{timeout} 秒），正在强制结束相关进程: taskkill /F /T /PID {pid}"
+    )
     _taskkill(pid, force=True)
     grace = _time.monotonic() + 5.0
     while not _session_exited(pid):
         if _time.monotonic() >= grace:
             print(
-                f'[{distro}] 强杀后 pid {pid} 仍在；请人工核查（tasklist /FI "PID eq {pid}"）后处置'
+                f"[{distro}] 强制结束后进程 {pid} 仍在运行；"
+                f'请人工核查（tasklist /FI "PID eq {pid}"）后处置'
             )
             return 2
         _time.sleep(0.2)
@@ -648,7 +658,7 @@ def _stop_ports_check(
         hint = "netstat -ano | findstr :<port>" if os.name == "nt" else "ss -ltnp | grep :<port>"
         print(f"[{distro}] 会话已退出，但端口仍被占用: {ports_busy}（可能是残留子进程；{hint}）")
         return 2
-    print(f"[{distro}] boot 会话已停止，端口已释放")
+    print(f"[{distro}] 服务已停止，端口已释放")
     return 0
 
 

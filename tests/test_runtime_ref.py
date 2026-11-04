@@ -188,7 +188,7 @@ def test_refsource_parse_and_render() -> None:
 
 def test_refsource_parse_rejects_invalid() -> None:
     for bad in ("", "tag:", "branch:", "commit:", "x:y:z", "latest:x", "branch"):
-        with pytest.raises(RuntimeRefError, match="非法 ref 源"):
+        with pytest.raises(RuntimeRefError, match="源码版本格式无效"):
             RefSource.parse(bad)
 
 
@@ -227,9 +227,9 @@ def test_resolve_candidate_branch_and_commit(repo: Path) -> None:
 
 def test_resolve_candidate_missing_ref_raises(repo: Path) -> None:
     mgr = _mgr(Path("/nonexistent-home"), repo)
-    with pytest.raises(RuntimeRefError, match="候选 ref 解析失败"):
+    with pytest.raises(RuntimeRefError, match="无法找到指定的源码版本"):
         mgr._resolve_candidate(RefSource.parse("branch:nope"), fetch=False, repo=repo)
-    with pytest.raises(RuntimeRefError, match="候选 ref 解析失败"):
+    with pytest.raises(RuntimeRefError, match="无法找到指定的源码版本"):
         mgr._resolve_candidate(RefSource.parse("commit:" + "0" * 40), fetch=False, repo=repo)
 
 
@@ -518,9 +518,9 @@ def test_update_requires_existing_install(
 def test_gate_full_and_data_rejected(home: Path, repo: Path) -> None:
     mgr = _mgr(home, repo)
     for level in ("full", "data"):
-        with pytest.raises(GateError, match="未启用"):
+        with pytest.raises(GateError, match="尚未实现"):
             mgr._gate(Path("/tmp"), level)
-    with pytest.raises(GateError, match="未知门禁级别"):
+    with pytest.raises(GateError, match="未知检查级别"):
         mgr._gate(Path("/tmp"), "weird")
 
 
@@ -658,7 +658,7 @@ def test_repoint_nt_maps_winproc_error(
         raise WinProcError("重指复核不一致")
 
     monkeypatch.setattr(winproc_mod, "repoint_dir_link", bad_repoint)
-    with pytest.raises(RuntimeRefError, match="重指 current 失败"):
+    with pytest.raises(RuntimeRefError, match="切换 current 指向的安装版本失败"):
         runtime_ref.repoint_current(distro_root, "2026.09")
 
 

@@ -146,13 +146,15 @@ def assert_instance_stopped(root: Path) -> None:
     """调用者持有实例锁；覆盖尚未监听端口的启动／停止阶段。"""
     record = _read(root)
     if record and _process(record) is not None:
-        raise ToolchainError(f"[{root.name}] 监督进程仍在运行，请先 ghrah distro stop {root.name}")
+        raise ToolchainError(
+            f"[{root.name}] 实例的后台管理进程仍在运行，请先 ghrah distro stop {root.name}"
+        )
     pidfile = boot_pid_path(root)
     if pidfile.exists():
         try:
             pid = int(pidfile.read_text().strip())
         except (ValueError, OSError) as exc:
-            raise ToolchainError("旧 pidfile 损坏，无法确认实例已停止") from exc
+            raise ToolchainError("旧版进程记录文件损坏，无法确认实例已停止") from exc
         if _pid_alive(pid) is not False:
             raise ToolchainError(f"[{root.name}] 旧会话仍在运行，请先停止")
 
@@ -183,9 +185,11 @@ def start_instance(
             try:
                 old_pid = int(boot_pid_path(root).read_text().strip())
             except (ValueError, OSError) as exc:
-                raise ToolchainError("旧 pidfile 损坏，先运行诊断") from exc
+                raise ToolchainError(
+                    "旧版进程记录文件损坏，请先运行 ghrah self doctor 检查"
+                ) from exc
             if _pid_alive(old_pid) is not False:
-                raise ToolchainError("已有旧会话，先显式停止后再启动")
+                raise ToolchainError("实例仍通过旧版方式运行，请先停止后再启动")
         logs = root / "logs"
         logs.mkdir(exist_ok=True)
         log_path = logs / f"{token}.log"
@@ -219,7 +223,7 @@ def start_instance(
             if not foreground:
                 process.terminate()
                 process.wait(timeout=10)
-            raise ToolchainError(f"启动监督进程失败，查看 {log_path}") from exc
+            raise ToolchainError(f"启动后台管理进程失败，请查看日志: {log_path}") from exc
         _write(
             root,
             {
@@ -242,12 +246,12 @@ def serve_instance(name: str, token: str, *, no_webui: bool = False) -> int:
     with _locked(root):
         record = _read(root)
         if record is None or record["token"] != token or record["pid"] != os.getpid():
-            raise ToolchainError("监督进程身份与实例记录不匹配")
+            raise ToolchainError("后台管理进程与实例记录不匹配")
     logging.getLogger().setLevel(logging.INFO)
 
     def ready() -> None:
         _transition(root, token, "running")
-        logging.info("[%s] 已就绪，日志与生命周期由后台监督进程管理", name)
+        logging.info("[%s] 启动检查已通过，服务在后台运行；可用 ghrah logs 查看日志", name)
 
     try:
         target = resolve_boot_target(name, record["generation"])
@@ -268,7 +272,7 @@ def stop_instance(name: str, *, timeout: float = 15.0) -> int:
     返回 0 前复核端口已释放；无法核对监督者但端口仍被占用时拒绝报告成功。
     """
     if not math.isfinite(timeout) or timeout <= 0:
-        raise ToolchainError("停止超时必须是有限正数")
+        raise ToolchainError("等待停止的秒数必须大于 0，且不能为无穷大")
     root = resolve_distro_root(name)
     if not root.is_dir():
         raise ToolchainError(f"实例未安装: {name}")
@@ -287,8 +291,9 @@ def stop_instance(name: str, *, timeout: float = 15.0) -> int:
             busy = _busy_ports(root, None, None)
             if busy:
                 raise ToolchainError(
-                    f"[{name}] 监督进程不可核对（pid={record['pid']}），但端口仍在监听: {busy}；"
-                    "可能处于不同 PID 命名空间，或监督者已退出留下孤儿子进程。"
+                    f"[{name}] 无法确认后台管理进程的身份（进程编号: {record['pid']}），"
+                    f"但端口仍在监听: {busy}；"
+                    "可能是当前环境无法查看该进程，或后台管理进程退出后仍有相关进程运行。"
                     "请人工核查后处理"
                 )
             return 0
@@ -316,7 +321,9 @@ def stop_instance(name: str, *, timeout: float = 15.0) -> int:
             _write(root, latest)
     busy = _busy_ports(root, None, None)
     if busy:
-        raise ToolchainError(f"[{name}] 监督进程已退出，但端口仍被占用: {busy}（可能有残留子进程）")
+        raise ToolchainError(
+            f"[{name}] 后台管理进程已退出，但端口仍被占用: {busy}（可能有残留子进程）"
+        )
     return 0
 
 

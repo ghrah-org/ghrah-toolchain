@@ -249,7 +249,7 @@ def test_repoint_verify_mismatch_fails_closed(
         return other if self == link else real_resolve(self)
 
     monkeypatch.setattr(winproc.Path, "resolve", lying_resolve)
-    with pytest.raises(WinProcError, match="复核不一致"):
+    with pytest.raises(WinProcError, match="目录链接更新后检查失败"):
         winproc.repoint_dir_link(link, target)
 
 

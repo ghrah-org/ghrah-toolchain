@@ -147,7 +147,7 @@ def test_starting_supervisor_blocks_config_and_update(home, repo, fake_build, ca
     before = (root / "distro.toml").read_bytes()
     assert main(["config", "set", "demo", "runtime.subject_port", "4321"]) == 1
     assert main(["update", "demo", "--json"]) == 1
-    assert "监督进程仍在运行" in capsys.readouterr().out
+    assert "后台管理进程仍在运行" in capsys.readouterr().out
     assert (root / "distro.toml").read_bytes() == before
     assert len(fake_build.calls["build"]) == 1
 

@@ -53,7 +53,7 @@ def test_pidfile_write_and_clear(home: Path) -> None:
 def test_pidfile_rejects_double_boot(home: Path) -> None:
     root = _distro_root(home)
     _write_boot_pid(root)  # 本进程即"活 pid"
-    with pytest.raises(ToolchainError, match="已有 boot 会话"):
+    with pytest.raises(ToolchainError, match="服务已在运行"):
         _write_boot_pid(root)
     _clear_boot_pid(root)
 
@@ -196,7 +196,7 @@ def test_stop_without_proc_skips_guard(
         assert rc == 0
         assert proc.returncode == 0
         out = capsys.readouterr().out
-        assert "跳过 cmdline 护栏" in out
+        assert "无法核对启动命令" in out
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -381,7 +381,7 @@ def test_stop_nt_guard_unavailable_degrades(
     rc = stop_boot_session("generic", timeout=1.0)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "跳过映像名护栏" in out
+    assert "无法查询进程" in out
     assert sim.taskkill_calls == [["taskkill", "/PID", str(pid)]]
 
 

@@ -54,11 +54,11 @@ def validate_value(key: str, value: Any) -> None:
         if not RepositorySource.parse(value).remote:
             raise ToolchainError("distro.repo.url 必须是 Git URL")
     if key == "distro.ref.gate" and value != "basic":
-        raise ToolchainError("目前只支持 basic 门禁，full/data 尚未实现")
+        raise ToolchainError("目前只支持 basic 基础检查，full/data 检查尚未实现")
     if key == "self.output" and value not in {"text", "json"}:
         raise ToolchainError("self.output 只能是 text 或 json")
     if key == "data.root" and value and not Path(value).expanduser().is_absolute():
-        raise ToolchainError("data.root 必须是绝对路径或以 ~ 开头；空字符串表示默认数据盘")
+        raise ToolchainError("data.root 必须是绝对路径或以 ~ 开头；空字符串表示使用默认数据目录")
 
 
 def parse_value(key: str, raw: str) -> Any:
@@ -135,13 +135,13 @@ def set_config(key: str, raw: str, *, name: str | None = None) -> dict:
                     raise ToolchainError("已有数据，不能直接更改 data.root；请先执行独立的数据迁移")
                 target = Path(value).expanduser().resolve() if value else (root / "data").resolve()
                 if target.exists() and (not target.is_dir() or any(target.iterdir())):
-                    raise ToolchainError("目标数据根非空或不是目录；数据认领／迁移需单独执行")
+                    raise ToolchainError("目标数据目录非空或不是目录；请通过单独的数据迁移操作处理")
                 if root.resolve().is_relative_to(target):
-                    raise ToolchainError("数据根不能是实例根目录或其父目录")
+                    raise ToolchainError("数据目录不能是实例安装目录或它的上级目录")
                 for directory in ("versions", "generations", "logs", "snapshots"):
                     protected = (root / directory).resolve()
                     if target.is_relative_to(protected) or protected.is_relative_to(target):
-                        raise ToolchainError(f"数据根不能与受管目录重叠: {protected}")
+                        raise ToolchainError(f"数据目录不能与工具链管理的目录重叠: {protected}")
                 from ghrah_toolchain.layout import list_distros
 
                 for other in list_distros():
@@ -153,7 +153,7 @@ def set_config(key: str, raw: str, *, name: str | None = None) -> dict:
                     )
                     for protected in (other_root.resolve(), other_data.resolve()):
                         if target.is_relative_to(protected) or protected.is_relative_to(target):
-                            raise ToolchainError(f"数据根与另一实例重叠: {other}")
+                            raise ToolchainError(f"数据目录与另一个实例的目录重叠: {other}")
             ports = {
                 "runtime.subject_port": config.subject_port,
                 "runtime.webui_port": config.webui_port,
@@ -161,6 +161,6 @@ def set_config(key: str, raw: str, *, name: str | None = None) -> dict:
             if key in ports:
                 ports[key] = value
                 if len(set(ports.values())) != 2:
-                    raise ToolchainError("Subject 与 WebUI 端口不能相同")
+                    raise ToolchainError("后端与前端端口不能相同")
         edit_toml(path, {key: value}, backup=True)
     return config_view(name)[key]

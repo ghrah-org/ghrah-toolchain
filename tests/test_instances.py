@@ -164,7 +164,7 @@ def test_failed_start_has_state_and_log(installed: Path) -> None:
     server.unlink()
     state = start_instance("demo", no_webui=True)
     _until(lambda: instance_status("demo")["state"] == "failed")
-    assert "OS server 入口缺失" in read_logs("demo")
+    assert "后端启动程序缺失" in read_logs("demo")
     assert state["pid"] > 0
 
 
