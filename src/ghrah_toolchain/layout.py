@@ -27,6 +27,10 @@ from ghrah_toolchain.errors import LayoutError
 # .pth）存量声明若仍写该值，load 显式报错而非静默容忍。
 _RETIRED_INSTALL_MODE = "worktree"
 
+# ~/.ghrah 顶层保留名：Ability 安装存储根在发行版目录下（``<distro>/ability``），
+# 因此顶层不应出现同名目录，``ability`` 也不能被当作发行版名。
+ABILITY_RESERVED_NAME = "ability"
+
 # 数据面五项 env 常量（自 boot.py 迁入；boot.py 保留同名 re-export 视图）
 ENV_DB_PATH = "GHRAH_SUBJECT_DB_PATH"
 ENV_TASKSTORE_DB = "GHRAH_SUBJECT_TASKSTORE_DB"
@@ -218,6 +222,11 @@ class DistroLayout:
     def generations(self) -> Path:
         return self.root / "generations"
 
+    @property
+    def ability(self) -> Path:
+        """该发行版的 Ability 安装存储根（``<distro>/ability``）。"""
+        return self.root / "ability"
+
     def list_versions(self) -> list[str]:
         """列出已安装版本目录名（排序；目录不存在返回空）。"""
         if not self.versions.is_dir():
@@ -234,18 +243,26 @@ class DistroLayout:
 def list_distros(root: Path | None = None) -> list[str]:
     """枚举安装域中的发行版目录（GPT 分区表读取）。
 
-    跳过非目录项与 ``boot.toml``；根不存在返回空列表（空世界）。
+    跳过非目录项、``boot.toml`` 与顶层保留名 ``ability``；根不存在返回空列表（空世界）。
     """
     base = root or ghrah_root()
     if not base.is_dir():
         return []
-    return sorted(p.name for p in base.iterdir() if p.is_dir() and not p.name.startswith("."))
+    return sorted(
+        p.name
+        for p in base.iterdir()
+        if p.is_dir() and not p.name.startswith(".") and p.name != ABILITY_RESERVED_NAME
+    )
 
 
 def resolve_distro_root(distro: str, root: Path | None = None) -> Path:
     """发行版根目录路径。"""
     if not distro or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", distro) is None:
         raise LayoutError(f"非法发行版名: {distro!r}")
+    if distro == ABILITY_RESERVED_NAME:
+        raise LayoutError(
+            f"{ABILITY_RESERVED_NAME!r} 是保留名（Ability 安装存储根），不能作为发行版名"
+        )
     base = root or ghrah_root()
     target = base / distro
     if not target.resolve().is_relative_to(base.resolve()):

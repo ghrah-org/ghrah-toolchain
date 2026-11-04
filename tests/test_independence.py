@@ -32,6 +32,27 @@ def test_boot_import_graph_has_no_ghrah() -> None:
     assert proc.stdout.strip().endswith("CLEAN"), proc.stdout
 
 
+def test_ability_modules_do_not_load_runtime() -> None:
+    """ability 命令层与薄桥只在子进程里转调目标运行时，自己不 import ghrah.*。"""
+    code = (
+        "import sys\n"
+        "import ghrah_toolchain.ability_bridge\n"
+        "import ghrah_toolchain.commands.ability\n"
+        "bad = [m for m in sys.modules if m == 'ghrah' or m.startswith('ghrah.')]\n"
+        "print('BAD:' + ','.join(bad) if bad else 'CLEAN')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={"PYTHONPATH": str(_SRC)},
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().endswith("CLEAN"), proc.stdout
+
+
 def test_declared_dependencies_do_not_load_runtime() -> None:
     """schema 与进程管理依赖可用，不加载目标运行时业务包。"""
     code = (

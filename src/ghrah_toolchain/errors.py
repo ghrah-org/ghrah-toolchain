@@ -41,3 +41,7 @@ class MaterializeError(ToolchainError):
 
 class WinProcError(ToolchainError):
     """Windows 进程探测/链接原语失败（pid 探测异常、重指复核不一致等）。"""
+
+
+class AbilityError(ToolchainError):
+    """ability 运行时定位/模块探测/转调失败。"""

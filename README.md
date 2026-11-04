@@ -3,7 +3,7 @@
 **已知的限制：**
 - `stop` 目前无法检查 Agent 是否仍在工作，可能在 Agent 循环中造成中断。
 - 面向开发者的 `dev` 已可用，`create` 等其余分发命令仍在实现中。
-- 用于开发能力包组的 `ability` 子命令正在实施中
+- `ability` 子命令已提供 `build`；安装、查看、校验、刷新与卸载需要目标运行时的 `ghrah-core` 提供统一入口，未提供时显式失败。
 
 九夏／ghrah 的独立工具链 CLI：提供安装与配置、源码组合的离线校验、构建，以及实例的后台启停与日志查询。
 
@@ -129,6 +129,34 @@ ghrah distro logs generic --follow
 ```
 
 日志跟随会切换到重新启动后的新会话；Ctrl+C 只退出读取，实例继续运行。跟随器也能识别文件替换及已观察到的截断，但工具链尚未实现写入端的自动轮转。
+
+## 管理 Ability 包
+
+`ghrah ability` 是**目标发行版** `ghrah-core` 的工具入口：工具链只负责参数、解释器与存储根解析、退出码和 JSON 透传；包的生成、安装、校验等领域实现全部在目标运行时里，工具链不复制任何包逻辑。
+
+**安装位置跟随发行版**：`<安装域>/<发行版>/ability/<namespace>/<name>/<version>/`（POSIX 上即 `~/.ghrah/<发行版>/ability/...`）。同一发行版内的所有项目共享这份存储；**不同发行版之间不共享**，需要时各装一次。原先的用户级 `~/.ghrah/ability/` 方案已作废：新命令不读取、不迁移该目录，只在检测到时提示"未使用"；`~/.ghrah` 顶层的 `ability` 也因此保留，不能再用作发行版名。
+
+```sh
+# 作者侧：生成索引并校验（不落安装，使用作者环境）
+ghrah ability build ./my-ability --check
+
+# 安装到默认发行版；或指定发行版与解释器
+ghrah ability install ./my-ability
+ghrah ability install ./my-ability --distro lab --python ~/.ghrah/lab/current/env/.venv/bin/python
+
+# 查看与校验
+ghrah ability list --json
+ghrah ability show acme.reporting
+ghrah ability verify acme.reporting
+
+# 卸载必须显式给 @version 或 --all
+ghrah ability uninstall acme.reporting@1.4.0
+ghrah ability uninstall acme.reporting --all --yes
+```
+
+`--distro` 选择目标发行版：省略时取 `boot.toml` 默认项的发行版段；没有默认项会报错并列出可用发行版，不会"自动挑唯一一个"。`--python` 显式指定解释器：给定时不再回退，缺少所需模块直接报错；省略时按作者环境（`VIRTUAL_ENV`、当前目录的 `.venv`）或目标发行版的 `current/env/.venv` 逐级探测。`--json` 由目标运行时在 stdout 输出恰好一个 JSON 对象，工具链原样透传，不重排、不追加字段；提示与日志一律写 stderr。
+
+当前进度：`build` 已可用（走 core P0 的 `ghrah.ability.tools.build`，只承诺 `<dir> [--check]`）。`install`/`list`/`show`/`verify`/`refresh`/`uninstall` 需要目标运行时提供 `ghrah.ability.tools.cli`（ghrah-core P2/P5）；未提供时命令显式失败并说明缺少的模块，不会退化成"看起来能用"的空实现。工具链自身的错误（找不到解释器、缺模块、缺默认发行版、保留名冲突）沿用统一错误信封，`scope` 为 `ability`；退出码约定为 0 成功、1 领域/校验失败、2 参数错误，core 的退出码原样返回。
 
 ## 更新已安装实例
 

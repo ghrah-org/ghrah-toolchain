@@ -192,6 +192,15 @@ def test_list_distros_enumerates_only_dirs(home: Path) -> None:
     assert list_distros() == ["generic", "lab"]
 
 
+def test_list_distros_skips_reserved_ability(home: Path) -> None:
+    """``ability`` 是 ~/.ghrah 顶层保留名，不被枚举成发行版。"""
+    home.mkdir(parents=True)
+    (home / "generic").mkdir()
+    (home / "ability").mkdir()
+    (home / "ability" / "acme").mkdir()
+    assert list_distros() == ["generic"]
+
+
 def test_resolve_distro_root_rejects_bad_names(home: Path) -> None:
     from ghrah_toolchain.errors import LayoutError
 
@@ -201,6 +210,8 @@ def test_resolve_distro_root_rejects_bad_names(home: Path) -> None:
         resolve_distro_root("a/b")
     with pytest.raises(LayoutError):
         resolve_distro_root(".hidden")
+    with pytest.raises(LayoutError, match="保留名"):
+        resolve_distro_root("ability")
     assert resolve_distro_root("generic") == home / "generic"
 
 
@@ -212,6 +223,7 @@ def test_distro_layout_paths(home: Path) -> None:
     assert layout.current == home / "generic" / "current"
     assert layout.last_good == home / "generic" / "last-good"
     assert layout.versions == home / "generic" / "versions"
+    assert layout.ability == home / "generic" / "ability"
 
 
 def test_list_versions_missing_dir(home: Path) -> None:

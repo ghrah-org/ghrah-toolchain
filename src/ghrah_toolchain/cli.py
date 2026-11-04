@@ -639,6 +639,9 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """诊断：安装域布局、boot.toml、各发行版 current commit / last_good / 落后。"""
     del args
+    from ghrah_toolchain.commands.ability import warn_legacy_store
+
+    warn_legacy_store()
     boot = BootToml.load()
     print(f"ghrah-toolchain {__version__}")
     import shutil
@@ -737,6 +740,10 @@ def _build_parser() -> argparse.ArgumentParser:
         },
     )
 
+    from ghrah_toolchain.commands.ability import register_ability_commands
+
+    register_ability_commands(subparsers)
+
     build = subparsers.add_parser("build", help="从源码构建 Python 和前端安装包")
     build.add_argument("--repo", help="源码仓库路径（优先于环境变量 GHRAH_MONOREPO_ROOT）")
     build.add_argument(
@@ -811,6 +818,8 @@ def main(argv: list[str] | None = None) -> int:
                             if args.command in {"check", "metadata"}
                             else "toolchain"
                             if args.command == "self"
+                            else "ability"
+                            if args.command == "ability"
                             else "user"
                         ),
                         "data": None,
