@@ -204,6 +204,10 @@
             "system": {
               "type": "object",
               "properties": {
+                "host_instance": {
+                  "type": "string",
+                  "minLength": 1
+                },
                 "kernel": {
                   "type": "string",
                   "minLength": 1
@@ -236,6 +240,7 @@
                 }
               },
               "required": [
+                "host_instance",
                 "kernel",
                 "providers"
               ],

@@ -79,6 +79,7 @@ components = ["kernel"]
 roots = ["subject/host"]
 
 [distro.demo.system]
+host_instance = "subject"
 kernel = "kernel"
 
 [[distro.demo.system.providers]]
@@ -230,7 +231,7 @@ def test_invalid_system_or_identity_declaration(workspace: Path, old: str, new: 
         load_manifest(workspace)
 
 
-_SYSTEM_BLOCK = '[distro.demo.system]\nkernel = "kernel"\n'
+_SYSTEM_BLOCK = '[distro.demo.system]\nhost_instance = "subject"\nkernel = "kernel"\n'
 
 
 def _replace_system(workspace: Path, block: str) -> None:
@@ -247,6 +248,8 @@ def _replace_system(workspace: Path, block: str) -> None:
         _SYSTEM_BLOCK + 'providers = ["kernel:namespace"]\n',
         # 缺 principal
         _SYSTEM_BLOCK + '\n[[distro.demo.system.providers]]\nid = "kernel:namespace"\n',
+        # 缺 host_instance（宿主实例选择器是必填）
+        '[distro.demo.system]\nkernel = "kernel"\n',
         # 未知字段
         _SYSTEM_BLOCK
         + '\n[[distro.demo.system.providers]]\nid = "kernel:namespace"\n'
