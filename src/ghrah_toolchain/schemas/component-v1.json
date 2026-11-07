@@ -289,6 +289,166 @@
         "minLength": 1
       },
       "uniqueItems": true
+    },
+    "providers": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z][a-z0-9-]*$": {
+          "type": "object",
+          "properties": {
+            "module": {
+              "type": "string",
+              "minLength": 1
+            },
+            "provider": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "order": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "after": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "requires_ready": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "restart": {
+              "enum": [
+                "never",
+                "on_failure",
+                "always"
+              ]
+            },
+            "max_restarts": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3
+            },
+            "window_seconds": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 60
+            },
+            "drain_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 500
+            },
+            "close_timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000
+            },
+            "close_action": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "ready": {
+              "$ref": "#/$defs/probe"
+            },
+            "health": {
+              "$ref": "#/$defs/probe"
+            },
+            "configuration": {
+              "type": "string",
+              "minLength": 1
+            },
+            "schemes": {
+              "type": "object",
+              "minProperties": 1,
+              "patternProperties": {
+                "^[a-z][a-z0-9-]*$": {
+                  "type": "object",
+                  "properties": {
+                    "contract": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "actions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1,
+                      "uniqueItems": true
+                    }
+                  },
+                  "required": [
+                    "contract",
+                    "actions"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "bindings": {
+              "type": "object",
+              "patternProperties": {
+                "^[a-z][a-z0-9-]*$": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "pattern": "^/"
+                    },
+                    "scheme": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "namespace": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "scheme",
+                    "scope",
+                    "namespace"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "module",
+            "provider",
+            "kind",
+            "schemes"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "required": [
@@ -297,5 +457,27 @@
     "version"
   ],
   "additionalProperties": false,
-  "$schema": "https://json-schema.org/draft/2020-12/schema"
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "probe": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "handshake",
+            "protocol"
+          ]
+        },
+        "contract": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "type",
+        "contract"
+      ],
+      "additionalProperties": false
+    }
+  }
 }

@@ -200,6 +200,227 @@
                 }
               },
               "additionalProperties": false
+            },
+            "system": {
+              "type": "object",
+              "properties": {
+                "kernel": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "providers": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*:[a-z][a-z0-9-]*$"
+                  },
+                  "uniqueItems": true,
+                  "minItems": 1
+                }
+              },
+              "required": [
+                "kernel",
+                "providers"
+              ],
+              "additionalProperties": false
+            },
+            "identity": {
+              "type": "object",
+              "properties": {
+                "grant_lifetime": {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "enum": [
+                        "instance",
+                        "ttl"
+                      ]
+                    },
+                    "ttl_seconds": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                },
+                "subjects": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "issuer": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "subject_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "kind": {
+                        "enum": [
+                          "user",
+                          "agent",
+                          "service"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "issuer",
+                      "subject_id",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "group_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "members": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      }
+                    },
+                    "required": [
+                      "group_id",
+                      "members"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "namespaces": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "namespace_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "owner": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "namespace_id",
+                      "owner"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "scopes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "scope_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "namespaces": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      },
+                      "subjects": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      }
+                    },
+                    "required": [
+                      "scope_id",
+                      "namespaces",
+                      "subjects"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "access": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "rule_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "namespace_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "resource": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "actions": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1,
+                        "uniqueItems": true
+                      },
+                      "subject": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "group": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "rule_id",
+                      "namespace_id",
+                      "resource",
+                      "actions"
+                    ],
+                    "additionalProperties": false,
+                    "oneOf": [
+                      {
+                        "required": [
+                          "subject"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "group"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "grant_lifetime",
+                "subjects",
+                "groups",
+                "namespaces",
+                "scopes",
+                "access"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
