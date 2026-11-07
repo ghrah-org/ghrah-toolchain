@@ -449,6 +449,24 @@
         }
       },
       "additionalProperties": false
+    },
+    "kernel": {
+      "type": "object",
+      "properties": {
+        "module": {
+          "type": "string",
+          "pattern": "^[A-Za-z_]\\w*(\\.[A-Za-z_]\\w*)*$"
+        },
+        "entry": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+        }
+      },
+      "required": [
+        "module",
+        "entry"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

@@ -17,6 +17,10 @@ _COMPONENT = """schema = 1
 id = "kernel"
 version = "0.1.0a0"
 
+[kernel]
+module = "ghrah_kernel"
+entry = "_kernel"
+
 [entries.host]
 kind = "process"
 argv = ["ghrah-subject-host"]
@@ -166,6 +170,28 @@ def test_invalid_provider_declaration(workspace: Path, old: str, new: str) -> No
     body = component.read_text(encoding="utf-8")
     assert old in body, old
     component.write_text(body.replace(old, new), encoding="utf-8")
+    with pytest.raises(ManifestError):
+        load_manifest(workspace)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        # module 必须是点分 Python 模块名
+        ('module = "ghrah_kernel"', 'module = "ghrah-kernel"'),
+        # entry 是命令行子命令 token，不带空格
+        ('entry = "_kernel"', 'entry = "kernel sub"'),
+        # 两个字段都必填
+        ('entry = "_kernel"\n', ""),
+        # 不接受任意 argv：参数由宿主注入
+        ('entry = "_kernel"', 'entry = "_kernel"\nargv = ["python"]'),
+    ],
+)
+def test_invalid_kernel_declaration(workspace: Path, old: str, new: str) -> None:
+    component = workspace.parent / "kernel" / "component.toml"
+    body = component.read_text(encoding="utf-8")
+    assert old in body, old
+    component.write_text(body.replace(old, new, 1), encoding="utf-8")
     with pytest.raises(ManifestError):
         load_manifest(workspace)
 
