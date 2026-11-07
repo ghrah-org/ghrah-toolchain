@@ -352,6 +352,9 @@ async def run_boot(
         _ENV_SERVER_HOST: config.host,
         _ENV_SERVER_PORT: str(sport),
     }
+    if target.distro_toml.environment.keys() & os_env.keys():
+        raise ToolchainError("runtime.env 与工具链管理的数据路径或端口配置冲突")
+    os_env.update(target.distro_toml.environment)
     # 形态判定装配：--webui-dev 显式走开发域；否则静态 serve 基座 dist。
     webui_kwargs: dict[str, object] = {}
     if not no_webui:

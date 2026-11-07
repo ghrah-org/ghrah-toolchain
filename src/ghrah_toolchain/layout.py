@@ -92,9 +92,17 @@ def _toml_str(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
 
 
+@dataclass(frozen=True)
+class RequiredAbility:
+    """发行版预装能力包清单项（``[distro.abilities].required`` 的一条）。"""
+
+    name: str
+    version: str
+
+
 @dataclass
 class DistroToml:
-    """发行版声明（五维 + repo/ref/plugins/runtime/data）。
+    """发行版声明（五维 + repo/ref/plugins/abilities/runtime/data）。
 
     agent 期望状态由 Subject 侧 durable Project API 承载；引导器不含任何
     agent 注入路径（无 ``[distro.boot.agents]``）。
@@ -108,10 +116,12 @@ class DistroToml:
     ref_gate: str = "basic"
     ref_fetch_on_update: bool = False
     enabled_plugins: list[str] = field(default_factory=list)
+    required_abilities: list[RequiredAbility] = field(default_factory=list)
     subject_port: int = 4112
     webui_port: int = 5173
     data_root: str = ""
     snapshot_keep: int = 3
+    environment: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(cls, distro_dir: Path) -> DistroToml:
@@ -127,13 +137,24 @@ class DistroToml:
         for key in ("distro", "runtime", "data"):
             if not isinstance(data.get(key, {}), dict):
                 raise LayoutError(f"{path}: {key} 必须是 table")
-        for key in ("repo", "ref", "plugins"):
+        for key in ("repo", "ref", "plugins", "abilities"):
             if not isinstance(distro.get(key, {}), dict):
                 raise LayoutError(f"{path}: distro.{key} 必须是 table")
         repo = distro.get("repo", {})
         ref = distro.get("ref", {})
         plugins = distro.get("plugins", {})
+        abilities = distro.get("abilities", {})
         runtime = data.get("runtime", {})
+        environment = runtime.get("env", {})
+        if not isinstance(environment, dict) or not all(
+            isinstance(key, str)
+            and key.startswith("GHRAH_SUBJECT_")
+            and key.replace("_", "").isalnum()
+            and isinstance(value, str)
+            and "\x00" not in value
+            for key, value in environment.items()
+        ):
+            raise LayoutError(f"{path}: runtime.env 必须是 GHRAH_SUBJECT_ 环境变量的字符串表")
         data_section = data.get("data", {})
         for section, key, default in (
             (runtime, "subject_port", 4112),
@@ -160,6 +181,24 @@ class DistroToml:
             raise LayoutError(f"{path}: distro.repo.path 与 url 不能同时设置")
         if not isinstance(enabled, list) or not all(isinstance(item, str) for item in enabled):
             raise LayoutError(f"{path}: enabled 必须是字符串数组")
+        required_raw = abilities.get("required", [])
+        if not isinstance(required_raw, list):
+            raise LayoutError(f"{path}: distro.abilities.required 必须是数组")
+        required_abilities: list[RequiredAbility] = []
+        for index, item in enumerate(required_raw):
+            if not isinstance(item, dict):
+                raise LayoutError(f"{path}: distro.abilities.required[{index}] 必须是 table")
+            name = item.get("name", "")
+            version = item.get("version", "")
+            if not isinstance(name, str) or not name:
+                raise LayoutError(
+                    f"{path}: distro.abilities.required[{index}].name 必须是非空字符串"
+                )
+            if not isinstance(version, str) or not version:
+                raise LayoutError(
+                    f"{path}: distro.abilities.required[{index}].version 必须是非空字符串"
+                )
+            required_abilities.append(RequiredAbility(name=name, version=version))
         install_mode = distro.get("install_mode")
         if install_mode is not None:
             if str(install_mode) == _RETIRED_INSTALL_MODE:
@@ -181,10 +220,12 @@ class DistroToml:
             ref_gate=str(ref.get("gate", "basic")),
             ref_fetch_on_update=bool(ref.get("fetch_on_update", False)),
             enabled_plugins=[str(p) for p in plugins.get("enabled", [])],
+            required_abilities=required_abilities,
             subject_port=int(runtime.get("subject_port", 4112)),
             webui_port=int(runtime.get("webui_port", 5173)),
             data_root=str(data_section.get("root", "")),
             snapshot_keep=int(data_section.get("snapshot_keep", 3)),
+            environment=dict(environment),
         )
 
 
@@ -332,6 +373,11 @@ def render_distro_toml(
         "",
         "[distro.plugins]",
         "enabled = []",
+        "",
+        "[distro.abilities]",
+        "required = [",
+        '  { name = "ghrah.project_agent_manage", version = "0.1.0" },',
+        "]",
         "",
         "[runtime]",
         f"subject_port = {subject_port}",

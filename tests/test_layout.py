@@ -73,6 +73,24 @@ def test_distro_toml_missing_returns_defaults(home: Path) -> None:
     assert d.subject_port == 4112
     assert d.webui_port == 5173
     assert d.snapshot_keep == 3
+    assert d.environment == {}
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        '[runtime]\nenv = "builtin"\n',
+        "[runtime.env]\nGHRAH_SUBJECT_ABILITY_SOURCE = true\n",
+        '[runtime.env]\nPATH = "/tmp"\n',
+        '[runtime.env]\nGHRAH_SUBJECT_ABILITY_SOURCE = "\\u0000"\n',
+    ],
+)
+def test_distro_environment_rejects_invalid_values(tmp_path: Path, document: str) -> None:
+    from ghrah_toolchain.errors import LayoutError
+
+    (tmp_path / "distro.toml").write_text(document)
+    with pytest.raises(LayoutError, match="runtime.env"):
+        DistroToml.load(tmp_path)
 
 
 @pytest.mark.parametrize(

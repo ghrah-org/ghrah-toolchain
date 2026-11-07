@@ -245,6 +245,9 @@ async def test_run_boot_env_injection_and_supervision(
     root, layout = distro_with_mock_os
     dump = tmp_path / "os_env.json"
     monkeypatch.setenv("BOOT_TEST_ENV_DUMP", str(dump))
+    monkeypatch.setenv("GHRAH_SUBJECT_ABILITY_SOURCE", "legacy")
+    with (layout.root / "distro.toml").open("a") as configuration:
+        configuration.write('\n[runtime.env]\nGHRAH_SUBJECT_ABILITY_SOURCE = "builtin"\n')
     target = resolve_boot_target("generic", None, root=root)
     port = free_port_factory()
     stop = asyncio.Event()
@@ -276,9 +279,21 @@ async def test_run_boot_env_injection_and_supervision(
     assert os_env["GHRAH_SUBJECT_WORKSPACE_ROOT"] == str(data_root / "workspace")
     assert os_env["GHRAH_SUBJECT_SERVER_HOST"] == "127.0.0.1"
     assert os_env["GHRAH_SUBJECT_SERVER_PORT"] == str(port)
+    assert os_env["GHRAH_SUBJECT_ABILITY_SOURCE"] == "builtin"
     # 数据盘目录已物化
     for sub in ("manifests", "projects", "workspace"):
         assert (data_root / sub).is_dir()
+
+
+async def test_distro_environment_cannot_override_managed_paths(distro_with_mock_os) -> None:
+    from ghrah_toolchain.errors import ToolchainError
+
+    root, layout = distro_with_mock_os
+    with (layout.root / "distro.toml").open("a") as configuration:
+        configuration.write('\n[runtime.env]\nGHRAH_SUBJECT_DB_PATH = "/tmp/another.db"\n')
+    target = resolve_boot_target("generic", None, root=root)
+    with pytest.raises(ToolchainError, match="runtime.env"):
+        await run_boot(target, no_webui=True)
 
 
 async def test_run_boot_os_exit_returns_failure(distro_with_mock_os, free_port_factory) -> None:

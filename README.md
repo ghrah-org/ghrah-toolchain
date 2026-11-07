@@ -179,6 +179,16 @@ full／data 门禁仍未实现，选择它们会在构建前失败。数据快�
 
 实例配置保存在 `<GHRAH_HOME>/<实例>/distro.toml`；CLI 偏好保存在 `<GHRAH_HOME>/config.toml`，缺省根为 `~/.ghrah`。业务模型、Project 和 Agent 设置仍由运行时自己的 API／UI 管理。
 
+实例需要固定 Subject 启动环境时，可以在 `distro.toml` 中配置字符串表。下次启动和重启会读取该表，实例配置优先于启动 shell 中的同名变量。
+
+```toml
+[runtime.env]
+GHRAH_SUBJECT_ABILITY_SOURCE = "builtin"
+GHRAH_SUBJECT_ABILITY_INSTALL_ROOT = "/home/example/.ghrah/generic/ability"
+```
+
+该表接受 `GHRAH_SUBJECT_` 前缀变量。数据路径、主机和端口由工具链的现有配置管理，同名冲突会报错。编辑配置后重新启动实例即可应用。
+
 ```sh
 ghrah distro config show generic
 ghrah distro config get generic runtime.subject_port --json
