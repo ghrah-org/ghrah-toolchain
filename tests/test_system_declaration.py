@@ -76,7 +76,15 @@ roots = ["subject/host"]
 
 [distro.demo.system]
 kernel = "kernel"
-providers = ["kernel:namespace", "kernel:agent"]
+
+[[distro.demo.system.providers]]
+id = "kernel:namespace"
+principal = '["local","ns"]'
+
+[[distro.demo.system.providers]]
+id = "kernel:agent"
+principal = '["local","agent"]'
+resolution_scope = "main"
 
 [distro.demo.instances.subject]
 component = "kernel"
@@ -85,10 +93,18 @@ host_entry = "subject/host"
 
 [distro.demo.identity]
 grant_lifetime = { mode = "instance" }
-subjects = [{ issuer = "local", subject_id = "admin", kind = "user" }]
+subjects = [
+    { issuer = "local", subject_id = "admin", kind = "user" },
+    { issuer = "local", subject_id = "ns", kind = "service" },
+    { issuer = "local", subject_id = "agent", kind = "agent" },
+]
 groups = []
 namespaces = [{ namespace_id = "main", owner = '["local","admin"]' }]
-scopes = [{ scope_id = "main", namespaces = ["main"], subjects = ['["local","admin"]'] }]
+scopes = [{
+    scope_id = "main",
+    namespaces = ["main"],
+    subjects = ['["local","admin"]', '["local","ns"]', '["local","agent"]'],
+}]
 [[distro.demo.identity.access]]
 rule_id = "entry"
 namespace_id = "main"
@@ -171,7 +187,8 @@ def test_unknown_provider_field_is_rejected(workspace: Path) -> None:
     [
         # 系统声明形状
         ('kernel = "kernel"', 'kernel = ""'),
-        ('providers = ["kernel:namespace", "kernel:agent"]', 'providers = ["kernel"]'),
+        ("principal = '[\"local\",\"ns\"]'", 'principal = "local|ns"'),
+        ("principal = '[\"local\",\"ns\"]'", 'principal = ""'),
         # 身份声明形状：字段名必须与 StaticIdentityConfig 的输入一致
         ('subject_id = "admin"', 'id = "admin"'),
         ('namespace_id = "main"', 'namespace = "main"'),
@@ -183,6 +200,47 @@ def test_invalid_system_or_identity_declaration(workspace: Path, old: str, new: 
     body = workspace.read_text(encoding="utf-8")
     assert old in body, old
     workspace.write_text(body.replace(old, new), encoding="utf-8")
+    with pytest.raises(ManifestError):
+        load_manifest(workspace)
+
+
+_SYSTEM_BLOCK = '[distro.demo.system]\nkernel = "kernel"\n'
+
+
+def _replace_system(workspace: Path, block: str) -> None:
+    body = workspace.read_text(encoding="utf-8")
+    start = body.index("[distro.demo.system]")
+    end = body.index("[distro.demo.identity]")
+    workspace.write_text(body[:start] + block + "\n" + body[end:], encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        # 启用清单必须是表数组：字符串数组是已撤回的旧形状
+        _SYSTEM_BLOCK + 'providers = ["kernel:namespace"]\n',
+        # 缺 principal
+        _SYSTEM_BLOCK + '\n[[distro.demo.system.providers]]\nid = "kernel:namespace"\n',
+        # 未知字段
+        _SYSTEM_BLOCK
+        + '\n[[distro.demo.system.providers]]\nid = "kernel:namespace"\n'
+        + "principal = '[\"local\",\"ns\"]'\ndiagnostics = false\n",
+        # principal 必须是 Subject.ref 的紧凑 JSON 形状
+        _SYSTEM_BLOCK
+        + '\n[[distro.demo.system.providers]]\nid = "kernel:namespace"\n'
+        + 'principal = "local|ns"\n',
+        # id 必须是 <component>:<provider>
+        _SYSTEM_BLOCK
+        + '\n[[distro.demo.system.providers]]\nid = "kernel"\n'
+        + "principal = '[\"local\",\"ns\"]'\n",
+        # resolution_scope 不能是空串
+        _SYSTEM_BLOCK
+        + '\n[[distro.demo.system.providers]]\nid = "kernel:namespace"\n'
+        + "principal = '[\"local\",\"ns\"]'\nresolution_scope = \"\"\n",
+    ],
+)
+def test_invalid_service_binding_declaration(workspace: Path, block: str) -> None:
+    _replace_system(workspace, block)
     with pytest.raises(ManifestError):
         load_manifest(workspace)
 
