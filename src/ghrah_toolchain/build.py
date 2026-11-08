@@ -189,8 +189,12 @@ def build_artifacts(
     缺省取清单的 ``workspace.default_distro``。未显式选择发行版时，旧源码
     仍可生成无 catalog 的产物。
     """
-    repo = Path(repo)
-    out_dir = Path(out_dir)
+    # 两个路径在此处归一为绝对路径，否则 staging 下的 src 也是相对的，
+    # 而 _build_webui 以 cwd=src 调 `pnpm --dir=<相对路径>`——相对路径会以
+    # src 为基准再拼一次，变成 src/src/... 而报「No such file or directory」。
+    # 缺省 out_dir（<repo>/dist/toolchain/<sha>）在 --repo 给相对路径时同样中招。
+    repo = Path(repo).resolve()
+    out_dir = Path(out_dir).resolve()
     sha = normalize_commit(repo, commit)
     if out_dir.exists() and any(out_dir.iterdir()):
         raise BuildError(f"构建结果目录已存在且非空: {out_dir}（如需重建请先移除）")

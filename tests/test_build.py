@@ -282,6 +282,29 @@ class TestBuildArtifacts:
         verify_artifacts(out)  # 完整性 + venv 装配 + import 冒烟 + entry point
         assert (out / "manifest.json").is_file()
 
+    @pytest.mark.parametrize("relative_repo", [False, True])
+    def test_relative_paths_do_not_double_join(
+        self,
+        fake_repo: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        relative_repo: bool,
+    ) -> None:
+        """相对 out_dir/--repo 不得让 staging/src 的相对路径再叠一层。
+
+        ``_build_webui`` 以 ``cwd=src`` 调 ``pnpm --dir=<pkg_dir>``；pkg_dir 若
+        相对，会以 src 为基准再拼一次变成 ``src/src/...``。既有用例一律用
+        ``tmp_path`` 绝对路径，照不出这条，故单列。
+        """
+        _require("pnpm")
+        monkeypatch.chdir(tmp_path)
+        repo = Path(fake_repo.name) if relative_repo else fake_repo
+        out = Path("out-rel")
+        result = _build(repo, out)
+        assert (tmp_path / "out-rel" / "manifest.json").is_file()
+        assert result.out_dir.is_absolute()
+        assert (tmp_path / "out-rel" / "catalog.json").is_file()
+
     def test_u5_failure_cleans_staging(
         self, fake_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
