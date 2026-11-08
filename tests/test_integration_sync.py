@@ -91,10 +91,10 @@ class TestInstallPackagesMode:
         # 基座产物树（entry.path 是代目录；无插件 gen_id = 基座版本名 → 同名异位）
         base_tree = home_packages / "generic" / "versions" / entry.version
         tree = base_tree
-        # 产物树形态：wheels 五包 + tarballs 三包 + observer-web + manifest + BOOTSTRAP
+        # 产物树形态：wheels 六包 + tarballs 三包 + observer-web + manifest + BOOTSTRAP
         assert not (tree / ".git").exists(), "产物树不得含 .git（安装域自包含）"
         wheels = sorted(p.name for p in (tree / "wheels").glob("*.whl"))
-        assert len(wheels) == 5, f"应有五个 wheel: {wheels}"
+        assert len(wheels) == 6, f"应有六个 wheel: {wheels}"
         assert (tree / "wheels" / "pins.txt").is_file()
         tarballs = sorted(p.name for p in (tree / "tarballs").glob("*.tgz"))
         assert len(tarballs) == 3, f"应有三个 tarball: {tarballs}"

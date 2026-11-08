@@ -351,6 +351,7 @@ class TestBuildIntegration:
         manifest = _manifest(out)
         wheel_names = {w["name"] for w in manifest["python"]["wheels"]}
         assert wheel_names == {
+            "ghrah-kernel",
             "ghrah-core",
             "ghrah-protocol",
             "ghrah-plugin",

@@ -41,7 +41,11 @@ from ghrah_toolchain.materialize import RUNTIME_PYTHON, pnpm_command, runtime_py
 logger = logging.getLogger(__name__)
 
 # 包管理面常量（测试以 fixtures 小仓 monkeypatch 重定向）
+# 顺序 = monorepo 组件 depends_on 的拓扑序：ghrah-kernel 不依赖任何内部组件，
+# 与 ghrah-plugin 同处最前端；其后的 protocol 依赖 plugin，core/subject 依赖
+# protocol，subject 再汇合 core/plugin/taskstore。
 PYTHON_PACKAGES = (
+    "ghrah-kernel",
     "ghrah-core",
     "ghrah-protocol",
     "ghrah-plugin",
@@ -73,7 +77,7 @@ OBSERVER_WEB_PACKAGE_DIR = "observer-web"
 MANIFEST_SCHEMA_VERSION = 1
 
 # 验证面常量（fixtures 小仓映射到自有 import 面/入口）
-VERIFY_IMPORTS = "import ghrah.core, ghrah.protocol, ghrah.subject, ghrah.plugin, ghrah.taskstore"
+VERIFY_IMPORTS = "import ghrah.core, ghrah.protocol, ghrah.subject, ghrah.plugin, ghrah.taskstore, ghrah_kernel"
 VERIFY_ENTRY_POINT = "ghrah-subject-server"
 
 
