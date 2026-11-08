@@ -10,16 +10,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from ghrah_toolchain.errors import MaterializeError
 from ghrah_toolchain.materialize import (
+    CATALOG_FILE,
     FINGERPRINT_NAME,
     GENERATION_TOML,
     GenerationSpec,
@@ -32,7 +35,9 @@ from ghrah_toolchain.materialize import (
     materialize_generation,
     pnpm_command,
     read_generation,
+    render_generation_toml,
 )
+from ghrah_toolchain.runtime_ref import RuntimeRefManager
 
 
 def _spec(base_ver: str = "2026.09", commit: str | None = None) -> GenerationSpec:
@@ -138,14 +143,125 @@ def test_m2_fingerprint_excludes_built_at() -> None:
 
 
 def test_m2b_render_canonical_vs_final() -> None:
-    spec = _spec()
-    from ghrah_toolchain.materialize import render_generation_toml
-
+    spec = replace(_spec(), catalog_sha256="e" * 64, plugins=(PluginRef("plugin", "1", "d" * 64),))
     canonical = render_generation_toml(spec, built_at=None)
     final = render_generation_toml(spec, built_at="2026-09-25T00:00:00Z")
-    assert canonical in final  # canonical = 最终形态去 built_at 行
+    assert final.replace('built_at = "2026-09-25T00:00:00Z"\n', "") == canonical
+    assert final.index("catalog_sha256") < final.index("built_at")
     assert "built_at" not in canonical
     assert "built_at" in final
+
+
+def test_legacy_generation_keeps_original_fingerprint(tmp_path: Path, fake_procs) -> None:
+    root = tmp_path / "generic"
+    tree = root / "versions" / "legacy"
+    _materialize_base(tree)
+    gen = root / "generations" / "legacy"
+    canonical = (
+        "# ghrah-bootloader 组合代清单；由 materialize_generation 维护\n"
+        '[generation]\nschema_version = 1\nbase_version = "legacy"\n'
+        'base_commit = "abc123"\npins_sha256 = "pin-digest"\n'
+    )
+    fingerprint = "3e7819e19deec1ac4b51cd3efebcaad23e2779457b27978da0c4bb09b5deb22a"
+    python = gen / "env" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    python.parent.mkdir(parents=True)
+    python.touch()
+    (gen / "env" / "node" / "node_modules").mkdir(parents=True)
+    (gen / GENERATION_TOML).write_text(
+        canonical + 'built_at = "2026-09-25T00:00:00Z"\n', encoding="utf-8"
+    )
+    (gen / FINGERPRINT_NAME).write_text(fingerprint + "\n", encoding="utf-8")
+    info = read_generation(gen)
+    assert info is not None and info.fingerprint == fingerprint
+    assert info.catalog_sha256 is None
+    spec = GenerationSpec(info.base_version, info.base_commit, info.pins_sha256)
+    assert spec.canonical_content() == canonical
+    assert generation_fingerprint(spec) == fingerprint
+    RuntimeRefManager(root=tmp_path)._sync_generation("generic", "legacy", force=False)
+    assert fake_procs.calls == []
+
+
+def _catalog_base(tree: Path) -> str:
+    _materialize_base(tree)
+    catalog = Path(__file__).with_name("catalog_golden.json").read_bytes()
+    (tree / CATALOG_FILE).write_bytes(catalog)
+    sha256 = hashlib.sha256(catalog).hexdigest()
+    path = tree / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["catalog"] = {"file": CATALOG_FILE, "sha256": sha256}
+    manifest["python"]["pins_sha256"] = hashlib.sha256(
+        (tree / "wheels/pins.txt").read_bytes()
+    ).hexdigest()
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return sha256
+
+
+@pytest.mark.parametrize("damage", ["missing", "tampered", "pre-catalog-generation"])
+def test_catalog_generation_materializes_and_sync_repairs(
+    tmp_path: Path, fake_procs, damage: str
+) -> None:
+    root = tmp_path / "generic"
+    tree = root / "versions" / "2026.09"
+    sha256 = _catalog_base(tree)
+    manager = RuntimeRefManager(root=tmp_path)
+    spec = manager._generation_spec(tree, "2026.09", "a" * 40)
+    assert spec.catalog_sha256 == sha256
+    assert generation_fingerprint(spec) != generation_fingerprint(
+        replace(spec, catalog_sha256="e" * 64)
+    )
+    result = materialize_generation(root, tree, spec)
+    gen = result.gen_dir
+    info = read_generation(gen)
+    assert info is not None and info.catalog_sha256 == result.catalog_sha256 == sha256
+    assert (gen / CATALOG_FILE).read_bytes() == (tree / CATALOG_FILE).read_bytes()
+    assert generation_complete(gen)
+    calls = len(fake_procs.calls)
+    manager._sync_generation("generic", result.gen_id, force=False)
+    assert len(fake_procs.calls) == calls
+
+    catalog = gen / CATALOG_FILE
+    if damage == "tampered":
+        catalog.write_text("{}", encoding="utf-8")
+    else:
+        catalog.unlink()
+    if damage == "pre-catalog-generation":
+        legacy = replace(spec, catalog_sha256="")
+        (gen / GENERATION_TOML).write_text(
+            render_generation_toml(legacy, built_at="yesterday"), encoding="utf-8"
+        )
+        (gen / FINGERPRINT_NAME).write_text(generation_fingerprint(legacy), encoding="utf-8")
+    else:
+        assert not generation_complete(gen)
+    manager._sync_generation("generic", result.gen_id, force=False)
+    assert len(fake_procs.calls) > calls
+    assert generation_complete(gen)
+    assert catalog.read_bytes() == (tree / CATALOG_FILE).read_bytes()
+    assert (gen / FINGERPRINT_NAME).read_text(encoding="utf-8").strip() == result.fingerprint
+
+
+@pytest.mark.parametrize("damage", ["missing", "tampered", "no-entry", "wrong-spec"])
+def test_materialization_rejects_inconsistent_base_catalog(
+    tmp_path: Path, fake_procs, damage: str
+) -> None:
+    root = tmp_path / "generic"
+    tree = root / "versions" / "2026.09"
+    spec = replace(_spec(), catalog_sha256=_catalog_base(tree))
+    catalog = tree / CATALOG_FILE
+    if damage == "missing":
+        catalog.unlink()
+    elif damage == "tampered":
+        catalog.write_text("{}", encoding="utf-8")
+    elif damage == "no-entry":
+        path = tree / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        del manifest["catalog"]
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+    else:
+        spec = replace(spec, catalog_sha256="e" * 64)
+    with pytest.raises(MaterializeError, match="catalog"):
+        materialize_generation(root, tree, spec)
+    assert not (root / "generations").exists()
+    assert fake_procs.calls == []
 
 
 # ── M3 物化全链路（fake 子进程） ─────────────────────────────

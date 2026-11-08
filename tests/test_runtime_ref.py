@@ -118,6 +118,7 @@ def _materialize_fake_artifacts(tree: Path, commit: str) -> None:
     tree.mkdir(parents=True, exist_ok=True)
     (tree / "wheels").mkdir(exist_ok=True)
     (tree / "wheels" / "pins.txt").write_text("third-party-pins\n", encoding="utf-8")
+    (tree / "manifest.json").write_text('{"schema_version": 1}\n', encoding="utf-8")
     (tree / "BOOTSTRAP.toml").write_text(
         f'[bootstrap]\nsource_commit = "{commit}"\nbuilt_at = "2026-09-25T00:00:00Z"\n',
         encoding="utf-8",

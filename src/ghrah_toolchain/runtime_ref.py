@@ -56,6 +56,7 @@ from ghrah_toolchain.layout import (
 from ghrah_toolchain.lifecycle import DEFAULT_HOST, port_in_use
 from ghrah_toolchain.materialize import (
     GenerationSpec,
+    base_catalog_sha256,
     generation_complete,
     generation_dir,
     generation_fingerprint,
@@ -460,7 +461,11 @@ class RuntimeRefManager:
 
         失败清理分层：新建基座与新建代同删；复用的基座/代保留。
         """
-        spec = self._generation_spec(tree, ver, commit)
+        try:
+            spec = self._generation_spec(tree, ver, commit)
+        except ToolchainError:
+            self._cleanup_tree(base_created, tree)
+            raise
         gen = spec.gen_id()
         gen_dir = generation_dir(distro_root, spec)
         gen_created = not gen_dir.exists()
@@ -523,12 +528,17 @@ class RuntimeRefManager:
         return new_entry
 
     def _generation_spec(self, tree: Path, ver: str, commit: str) -> GenerationSpec:
-        """从基座产物树读 pins_sha256，组装代身份输入（插件集当前恒空）。"""
+        """从基座产物树读取依赖与 catalog 的摘要，组装代身份输入。"""
         pins = tree / "wheels" / "pins.txt"
         if not pins.is_file():
             raise RuntimeRefError(f"构建结果中缺少依赖版本清单 pins.txt: {tree}")
         pins_sha256 = hashlib.sha256(pins.read_bytes()).hexdigest()
-        return GenerationSpec(base_version=ver, base_commit=commit, pins_sha256=pins_sha256)
+        return GenerationSpec(
+            base_version=ver,
+            base_commit=commit,
+            pins_sha256=pins_sha256,
+            catalog_sha256=base_catalog_sha256(tree),
+        )
 
     def _cleanup_generation(self, created: bool, gen_dir: Path) -> None:
         """失败时移除本次新建的组合代（复用的代保留）。"""
@@ -815,14 +825,19 @@ class RuntimeRefManager:
         if info is None:
             raise RuntimeRefError(f"安装版本目录缺失或不可读: {gen_dir}（请先完成安装）")
         base_tree = self._root / distro / "versions" / info.base_version
+        catalog_sha256 = base_catalog_sha256(base_tree)
+        if info.catalog_sha256 is not None and info.catalog_sha256 != catalog_sha256:
+            raise RuntimeRefError(f"基座 catalog 摘要与已安装代的记录不符: {base_tree}")
         spec = GenerationSpec(
             base_version=info.base_version,
             base_commit=info.base_commit,
             pins_sha256=info.pins_sha256,
             plugins=info.plugins,
+            catalog_sha256=catalog_sha256,
         )
         consistent = (
             not force
+            and (info.catalog_sha256 or "") == spec.catalog_sha256
             and info.fingerprint == generation_fingerprint(spec)
             and generation_complete(gen_dir)
         )

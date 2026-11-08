@@ -9,6 +9,7 @@
 ```
 generations/<gen-id>/
   GENERATION.toml        # 基座 ver+commit、插件集（当前恒空）、pins_sha256、built_at
+  catalog.json           # 新代从基座复制的目录，文件摘要记入 GENERATION.toml
   .deps-fingerprint      # GENERATION.toml canonical 内容哈希（排除 built_at）
   env/.venv/             # uv venv + uv pip install 基座 wheels + pins 平铺（零解析）
   env/node/              # webui shim（file: 消费基座 tarballs + observer-web）+ pnpm install
@@ -44,6 +45,7 @@ logger = logging.getLogger(__name__)
 GENERATION_SCHEMA_VERSION = 1
 FINGERPRINT_NAME = ".deps-fingerprint"
 GENERATION_TOML = "GENERATION.toml"
+CATALOG_FILE = "catalog.json"
 
 _CACHE_SUBDIR_UV = "cache/uv"
 _CACHE_SUBDIR_PNPM = "cache/pnpm-store"
@@ -107,6 +109,7 @@ class GenerationSpec:
     base_commit: str
     pins_sha256: str
     plugins: tuple[PluginRef, ...] = field(default=())
+    catalog_sha256: str = ""
 
     def gen_id(self) -> str:
         return generation_id(self.base_version, self.plugins)
@@ -153,6 +156,8 @@ def render_generation_toml(spec: GenerationSpec, *, built_at: str | None) -> str
         f'base_commit = "{_escape(spec.base_commit)}"',
         f'pins_sha256 = "{_escape(spec.pins_sha256)}"',
     ]
+    if spec.catalog_sha256:
+        lines.append(f'catalog_sha256 = "{_escape(spec.catalog_sha256)}"')
     if built_at is not None:
         lines.append(f'built_at = "{_escape(built_at)}"')
     for plugin in sorted(spec.plugins, key=lambda p: p.name):
@@ -184,6 +189,7 @@ class GenerationInfo:
     pins_sha256: str
     plugins: tuple[PluginRef, ...]
     fingerprint: str | None
+    catalog_sha256: str | None = None
 
 
 def read_generation(gen_dir: Path) -> GenerationInfo | None:
@@ -197,6 +203,11 @@ def read_generation(gen_dir: Path) -> GenerationInfo | None:
     except tomllib.TOMLDecodeError, OSError:
         return None
     section = data.get("generation", {})
+    if not isinstance(section, dict):
+        return None
+    catalog_sha256 = section.get("catalog_sha256")
+    if "catalog_sha256" in section and not _is_sha256(catalog_sha256):
+        return None
     plugins = tuple(
         PluginRef(
             name=str(p.get("name", "")),
@@ -219,16 +230,26 @@ def read_generation(gen_dir: Path) -> GenerationInfo | None:
         pins_sha256=str(section.get("pins_sha256", "")),
         plugins=plugins,
         fingerprint=fingerprint,
+        catalog_sha256=catalog_sha256,
     )
 
 
 def generation_complete(gen_dir: Path) -> bool:
-    """完整性探针：venv 解释器与 webui node_modules 均在位。"""
+    """检查运行环境，并校验新代的 catalog 文件。"""
     gen_dir = Path(gen_dir)
     py = _venv_python(gen_dir / "env" / ".venv")
-    if not py.is_file():
+    if not py.is_file() or not (gen_dir / "env" / "node" / "node_modules").is_dir():
         return False
-    return (gen_dir / "env" / "node" / "node_modules").is_dir()
+    info = read_generation(gen_dir)
+    catalog = gen_dir / CATALOG_FILE
+    if info is None or info.catalog_sha256 is None:
+        return not (catalog.exists() or catalog.is_symlink()) and (
+            info is not None or not (gen_dir / GENERATION_TOML).exists()
+        )
+    try:
+        return _catalog_file_sha256(catalog) == info.catalog_sha256
+    except MaterializeError:
+        return False
 
 
 def _venv_python(venv: Path) -> Path:
@@ -251,6 +272,7 @@ class MaterializeResult:
     gen_dir: Path
     gen_id: str
     fingerprint: str
+    catalog_sha256: str = ""
 
 
 def materialize_generation(
@@ -263,35 +285,40 @@ def materialize_generation(
     """把基座产物树装配成组合代（staging 隔离 + ``os.replace`` 原子落位）。
 
     - 同代已存在且完整且指纹一致 → 直接复用（零物化）；
-    - ``rebuild=True`` 或既有代不完整/指纹不符 → 重建（旧代先移除）；
-    - 失败 = staging 清理，目标要么完整要么不存在。
+    - ``rebuild=True`` 或既有代不完整/指纹不符 → 先构建 staging，再替换既有代；
+    - staging 构建失败时清理 staging，保留原代目录。
     """
     distro_root = Path(distro_root)
     base_tree = Path(base_tree)
     gen_dir = generation_dir(distro_root, spec)
     fingerprint = generation_fingerprint(spec)
+    manifest = _read_base_manifest(base_tree)
+    if base_catalog_sha256(base_tree, manifest=manifest) != spec.catalog_sha256:
+        raise MaterializeError(f"基座 catalog 摘要与代声明不符: {base_tree}")
+    result = MaterializeResult(gen_dir, spec.gen_id(), fingerprint, spec.catalog_sha256)
     if not rebuild:
         existing = read_generation(gen_dir)
         if (
             existing is not None
             and existing.fingerprint == fingerprint
+            and (existing.catalog_sha256 or "") == spec.catalog_sha256
             and generation_complete(gen_dir)
         ):
             logger.info("使用已有运行环境，无需重新安装: %s", gen_dir)
-            return MaterializeResult(gen_dir=gen_dir, gen_id=spec.gen_id(), fingerprint=fingerprint)
-    if gen_dir.exists():
-        shutil.rmtree(gen_dir)  # 重建路径：旧代整体移除后经 staging 重建
+            return result
     staging = gen_dir.parent / f"{gen_dir.name}.tmp-{os.getpid()}"
     if staging.exists():
         shutil.rmtree(staging)
     try:
-        _materialize_into(distro_root, base_tree, spec, staging, fingerprint)
+        _materialize_into(distro_root, base_tree, spec, staging, fingerprint, manifest)
         gen_dir.parent.mkdir(parents=True, exist_ok=True)
+        if gen_dir.exists():
+            shutil.rmtree(gen_dir)
         os.replace(staging, gen_dir)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    return MaterializeResult(gen_dir=gen_dir, gen_id=spec.gen_id(), fingerprint=fingerprint)
+    return result
 
 
 def _materialize_into(
@@ -300,8 +327,8 @@ def _materialize_into(
     spec: GenerationSpec,
     staging: Path,
     fingerprint: str,
+    manifest: dict,
 ) -> None:
-    manifest = _read_base_manifest(base_tree)
     pins_sha256 = manifest["python"]["pins_sha256"]
     if pins_sha256 != spec.pins_sha256:
         expected = spec.pins_sha256[:12]
@@ -309,6 +336,12 @@ def _materialize_into(
             f"构建文件中的依赖清单校验值与安装记录不符: {base_tree}"
             f"（{pins_sha256[:12]}… != {expected}…）"
         )
+    if spec.catalog_sha256:
+        staging.mkdir(parents=True)
+        catalog = staging / CATALOG_FILE
+        shutil.copyfile(base_tree / CATALOG_FILE, catalog)
+        if _catalog_file_sha256(catalog) != spec.catalog_sha256:
+            raise MaterializeError(f"复制后的 catalog 摘要与代声明不符: {catalog}")
     _install_python_env(distro_root, base_tree, staging / "env" / ".venv")
     _install_webui_env(distro_root, base_tree, manifest, staging / "env" / "node")
     built_at = datetime.now(UTC).isoformat(timespec="seconds")
@@ -323,9 +356,48 @@ def _read_base_manifest(base_tree: Path) -> dict:
     if not manifest_path.is_file():
         raise MaterializeError(f"构建结果中缺少文件清单 manifest.json: {base_tree}")
     try:
-        return json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as e:
         raise MaterializeError(f"无法读取构建文件清单 manifest.json: {manifest_path}: {e}") from e
+    if not isinstance(manifest, dict):
+        raise MaterializeError(f"构建文件清单必须是对象: {manifest_path}")
+    return manifest
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _catalog_file_sha256(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise MaterializeError(f"catalog 缺失或不是普通文件: {path}")
+    try:
+        with path.open("rb") as source:
+            return hashlib.file_digest(source, "sha256").hexdigest()
+    except OSError as e:
+        raise MaterializeError(f"无法读取 catalog: {path}: {e}") from e
+
+
+def base_catalog_sha256(base_tree: Path, *, manifest: dict | None = None) -> str:
+    """返回已校验的基座 catalog 摘要。旧基座返回空串。"""
+    if manifest is None:
+        manifest = _read_base_manifest(base_tree)
+    catalog = base_tree / CATALOG_FILE
+    if "catalog" not in manifest:
+        if catalog.exists() or catalog.is_symlink():
+            raise MaterializeError(f"基座 manifest.json 缺少 catalog 条目: {base_tree}")
+        return ""
+    entry = manifest["catalog"]
+    if (
+        not isinstance(entry, dict)
+        or entry.get("file") != CATALOG_FILE
+        or not _is_sha256(entry.get("sha256"))
+    ):
+        raise MaterializeError(f"基座 manifest.json 的 catalog 条目无效: {base_tree}")
+    actual = _catalog_file_sha256(catalog)
+    if actual != entry["sha256"]:
+        raise MaterializeError(f"基座 catalog 摘要与 manifest.json 不符: {catalog}")
+    return actual
 
 
 def _uv_env(distro_root: Path) -> dict[str, str]:
