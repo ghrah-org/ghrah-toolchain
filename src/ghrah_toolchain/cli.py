@@ -358,17 +358,21 @@ def _cmd_build(args: argparse.Namespace) -> int:
     source = RefSource.parse(args.ref)
     commit = RuntimeRefManager()._resolve_candidate(source, fetch=False, repo=repo)  # noqa: SLF001
     out_dir = Path(args.out).expanduser() if args.out else repo / "dist" / "toolchain" / commit[:7]
-    result = build_artifacts(repo, commit, out_dir=out_dir)
+    result = build_artifacts(repo, commit, out_dir=out_dir, distro=args.distro)
     print(f"构建完成: {result.out_dir}")
     print(f"源码提交: {result.source_commit}")
     print(f"Python 安装包: {', '.join(result.wheels)}")
     print(f"前端安装包: {', '.join(result.tarballs)}")
     print(f"依赖版本清单: {result.pins_file}")
+    if result.catalog is not None:
+        print(f"代内目录: {result.catalog}（发行版 {result.distro}）")
+    else:
+        print("代内目录: 未生成（旧版源码）")
     if args.no_verify:
         print("（已跳过验证）")
     else:
         verify_artifacts(result.out_dir)
-        print("构建结果检查通过（Python 包可导入，ghrah-subject-server 启动程序存在）")
+        print("构建结果检查通过（Python 包可导入，宿主启动程序存在）")
     return 0
 
 
@@ -758,6 +762,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-verify",
         action="store_true",
         help="跳过构建后的检查（默认检查 Python 包能否导入、启动程序是否存在）",
+    )
+    build.add_argument(
+        "--distro",
+        help="发行版名（不是实例名；省略时使用 ghrah.toml 的 workspace.default_distro）",
     )
     build.set_defaults(func=_cmd_build)
 

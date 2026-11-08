@@ -36,7 +36,7 @@ from pathlib import Path
 
 from ghrah_toolchain import __version__
 from ghrah_toolchain.errors import BuildError
-from ghrah_toolchain.materialize import RUNTIME_PYTHON, pnpm_command, runtime_python
+from ghrah_toolchain.materialize import CATALOG_FILE, RUNTIME_PYTHON, pnpm_command, runtime_python
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +77,11 @@ OBSERVER_WEB_PACKAGE_DIR = "observer-web"
 MANIFEST_SCHEMA_VERSION = 1
 
 # 验证面常量（fixtures 小仓映射到自有 import 面/入口）
-VERIFY_IMPORTS = "import ghrah.core, ghrah.protocol, ghrah.subject, ghrah.plugin, ghrah.taskstore, ghrah_kernel"
-VERIFY_ENTRY_POINT = "ghrah-subject-server"
+VERIFY_IMPORTS = (
+    "import ghrah.core, ghrah.protocol, ghrah.subject, ghrah.plugin, ghrah.taskstore, ghrah_kernel"
+)
+# 无代内目录的旧代沿用既有入口，新代从 catalog.host.command 读取入口。
+LEGACY_ENTRY_POINT = "ghrah-subject-server"
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,8 @@ class BuildResult:
     wheels: list[str]
     tarballs: list[str]
     pins_file: Path
+    catalog: Path | None
+    distro: str | None
 
 
 # ── 子进程与哈希辅助 ─────────────────────────────────────────
@@ -172,11 +177,17 @@ def read_source_commit(tree: Path) -> str | None:
     return str(commit) if commit else None
 
 
-def build_artifacts(repo: Path, commit: str, *, out_dir: Path) -> BuildResult:
+def build_artifacts(
+    repo: Path, commit: str, *, out_dir: Path, distro: str | None = None
+) -> BuildResult:
     """从源仓固定 commit 构建发行物树并原子落位 ``out_dir``。
 
     staging 目录全程隔离，成功后 :func:`os.replace`；失败清理 staging、
     ``out_dir`` 保持不存在（要么完整要么不存在）。
+
+    ``distro`` 是**发行版名**（区别于 ``dev`` 子命令里同名的实例名）；
+    缺省取清单的 ``workspace.default_distro``。未显式选择发行版时，旧源码
+    仍可生成无 catalog 的产物。
     """
     repo = Path(repo)
     out_dir = Path(out_dir)
@@ -189,7 +200,7 @@ def build_artifacts(repo: Path, commit: str, *, out_dir: Path) -> BuildResult:
         _rmtree(staging)
     staging.mkdir(parents=True)
     try:
-        result = _build_into(repo, sha, staging)
+        result = _build_into(repo, sha, staging, distro=distro)
         if out_dir.exists():  # 仅空目录（非空已在上方拒绝）；清掉再原子落位
             out_dir.rmdir()
         os.replace(staging, out_dir)
@@ -202,33 +213,82 @@ def build_artifacts(repo: Path, commit: str, *, out_dir: Path) -> BuildResult:
     return replace(result, out_dir=out_dir)
 
 
-def _build_into(repo: Path, sha: str, staging: Path) -> BuildResult:
+def _build_into(repo: Path, sha: str, staging: Path, *, distro: str | None) -> BuildResult:
     wheels_dir = staging / "wheels"
     tarballs_dir = staging / "tarballs"
     src = _archive_source(repo, sha, staging)
-    python_pin = src / ".python-version"
-    interpreter = runtime_python(
-        {
-            "python": {
-                "interpreter": python_pin.read_text(encoding="utf-8").strip()
-                if python_pin.is_file()
-                else RUNTIME_PYTHON
-            }
-        }
-    )
+    catalog_file, distro_name = None, None
+    if distro is None and _is_legacy_source(src):
+        logger.info("旧版源码不含代内目录声明，沿用旧入口解析")
+    else:
+        catalog_file, distro_name = _write_catalog(src, staging, distro=distro)
+    interpreter = _source_python(src)
     wheel_files = _build_wheels(src, wheels_dir)
     pins_file = _export_pins(src, wheels_dir)
     tarball_entries = _build_webui(src, tarballs_dir, staging)
     _rmtree(src)  # 产物树不含源码 checkout（纯产物）
     _write_bootstrap(staging, sha)
-    _write_manifest(staging, sha, wheel_files, pins_file, tarball_entries, interpreter=interpreter)
+    _write_manifest(
+        staging,
+        sha,
+        wheel_files,
+        pins_file,
+        tarball_entries,
+        interpreter=interpreter,
+        catalog_file=catalog_file,
+    )
     return BuildResult(
         out_dir=staging,
         source_commit=sha,
         wheels=[w.name for w in wheel_files],
         tarballs=[t.name for t, _, _ in tarball_entries],
         pins_file=pins_file.relative_to(staging),
+        catalog=catalog_file.relative_to(staging) if catalog_file is not None else None,
+        distro=distro_name,
     )
+
+
+def _source_python(src: Path) -> str:
+    pin = src / ".python-version"
+    version = pin.read_text(encoding="utf-8").strip() if pin.is_file() else RUNTIME_PYTHON
+    return runtime_python({"python": {"interpreter": version}})
+
+
+def _is_legacy_source(src: Path) -> bool:
+    """识别尚未引入 catalog 声明的历史源码。"""
+    from ghrah_toolchain.manifest import ManifestError, _load, load_manifest
+
+    manifest = src / "ghrah.toml"
+    if not manifest.exists() and not manifest.is_symlink():
+        return True
+    try:
+        distros = _load(manifest).get("distro")
+        if not isinstance(distros, dict) or any(
+            not isinstance(item, dict) or "system" in item or "identity" in item
+            for item in distros.values()
+        ):
+            return False
+        workspace = load_manifest(manifest)
+    except ManifestError, OSError, ValueError:
+        return False  # 交给 catalog 汇总并报告错误
+    return "default_distro" in workspace.data["workspace"]
+
+
+def _render_catalog(catalog: dict) -> str:
+    return json.dumps(catalog, ensure_ascii=False, indent=2) + "\n"
+
+
+def _write_catalog(src: Path, staging: Path, *, distro: str | None) -> tuple[Path, str]:
+    """按 §5.10 汇总 catalog 并写入 ``staging/catalog.json``（pretty JSON）。
+
+    ``CatalogError`` 直接向上抛：诊断已逐行 render，CLI 负责整份打印并返回 3。
+    """
+    from ghrah_toolchain.catalog import build_catalog
+
+    catalog = build_catalog(src, distro=distro)
+    target = staging / CATALOG_FILE
+    target.write_text(_render_catalog(catalog), encoding="utf-8", newline="")
+    return target, str(catalog["distro"])
 
 
 def _archive_source(repo: Path, sha: str, staging: Path) -> Path:
@@ -365,6 +425,7 @@ def _write_manifest(
     tarballs: list[tuple[Path, str, str]],
     *,
     interpreter: str = "3.11",
+    catalog_file: Path | None = None,
 ) -> None:
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -396,6 +457,12 @@ def _write_manifest(
             "observer_web": {"files": _observer_web_listing(staging)},
         },
     }
+    if catalog_file is not None:
+        # 代内目录的摘要与 wheels 条目同风格：文件字节的 sha256
+        manifest["catalog"] = {
+            "file": CATALOG_FILE,
+            "sha256": _sha256_file(catalog_file),
+        }
     (staging / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -441,6 +508,8 @@ def verify_artifacts(out_dir: Path) -> None:
     if _sha256_file(pins) != manifest["python"]["pins_sha256"]:
         raise BuildError(f"依赖版本清单的校验值不符: {pins}")
 
+    entry_point = _verify_catalog(out_dir, manifest)
+
     with tempfile.TemporaryDirectory(prefix="bootloader-verify-") as td:
         venv = Path(td) / "venv"
         win = os.name == "nt"
@@ -451,11 +520,53 @@ def verify_artifacts(out_dir: Path) -> None:
         install += ["-r", str(pins)]
         _run(install)
         _run([str(py), "-c", VERIFY_IMPORTS])
-        server = venv / (
-            f"Scripts/{VERIFY_ENTRY_POINT}.exe" if win else f"bin/{VERIFY_ENTRY_POINT}"
-        )
+        server = venv / (f"Scripts/{entry_point}.exe" if win else f"bin/{entry_point}")
         if not server.exists():
             raise BuildError(f"缺少后端启动程序: {server}")
         # 入口存在性校验即可：真实入口 main() 不解析参数（--help 会直接启动
         # 服务器占端口），拉起冒烟属 boot 域验证，不在构建验证面
     logger.info("构建结果检查通过: %s", out_dir)
+
+
+def _verify_catalog(out_dir: Path, manifest: dict) -> str:
+    """校验 catalog 三件事并返回宿主入口名（新代不再有硬编码入口常量）。
+
+    1. ``manifest["catalog"]`` 指向的文件存在且摘要相符；
+    2. 文件本身通过 ``catalog-v1.json``（identity 经离线 registry 解析）；
+    3. 摘要可重算且与文件内 ``digest`` 一致——不得只信文件里的值。
+
+    入口名从 ``catalog.host.command[0]`` 推导：验证面与启动面共用同一份事实。
+    旧代（无 catalog 条目）另作处理，见 :func:`_verify_catalog` 开头的回落。
+    """
+    from ghrah_toolchain.catalog import catalog_digest
+    from ghrah_toolchain.manifest import _validate
+
+    catalog_path = out_dir / CATALOG_FILE
+    if "catalog" not in manifest:
+        if catalog_path.exists() or catalog_path.is_symlink():
+            raise BuildError("manifest.json 缺少现有 catalog.json 的条目")
+        # 旧代兼容：清单未声明 system 时代目录里没有 catalog，验收回落到既有
+        # 入口名。这不是放水——没有 catalog 就没有「新入口」可言，启动侧也
+        # 仍走旧路径（P1-8b 才收敛）。
+        logger.info("manifest.json 无 catalog 条目：按旧代处理，沿用 %s 验收", LEGACY_ENTRY_POINT)
+        return LEGACY_ENTRY_POINT
+    entry = manifest["catalog"]
+    if not isinstance(entry, dict) or entry.get("file") != CATALOG_FILE:
+        raise BuildError("manifest.json 的 catalog 条目必须指向 catalog.json")
+    if not catalog_path.is_file():
+        raise BuildError(f"清单指向的 catalog 缺失: {catalog_path}")
+    actual = _sha256_file(catalog_path)
+    if actual != entry.get("sha256"):
+        raise BuildError(
+            f"catalog sha256 不符（清单 {str(entry.get('sha256'))[:12]}… 实测 {actual[:12]}…）"
+        )
+
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    _validate(catalog, "catalog", catalog_path)
+    if catalog_digest(catalog) != catalog.get("digest"):
+        raise BuildError("catalog 的 digest 与重算值不符（文件被改写或摘要算法漂移）")
+
+    command = catalog.get("host", {}).get("command") or []
+    if not command:
+        raise BuildError("catalog.host.command 为空；构建期不猜测宿主入口")
+    return str(command[0])

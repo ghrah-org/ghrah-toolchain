@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -58,8 +59,12 @@ from ghrah_toolchain.build import (
     _build_webui,
     _build_wheels,
     _export_pins,
+    _is_legacy_source,
+    _render_catalog,
     _rmtree,
+    _source_python,
 )
+from ghrah_toolchain.catalog import build_catalog
 from ghrah_toolchain.errors import BuildError, ToolchainError
 from ghrah_toolchain.layout import (
     DistroLayout,
@@ -70,12 +75,13 @@ from ghrah_toolchain.layout import (
 )
 from ghrah_toolchain.lifecycle import DEFAULT_HOST, BootStack, StackConfig, port_in_use
 from ghrah_toolchain.materialize import (
-    RUNTIME_PYTHON,
+    CATALOG_FILE,
     _install_python_env,
     _uv_env,
     _venv_python,
 )
 from ghrah_toolchain.runtime_ref import _pid_alive
+from ghrah_toolchain.toml_io import atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +93,13 @@ ARTIFACTS = "artifacts"
 GEN = "gen"
 WORK = ".work"
 STATE_SCHEMA = 1
-DEPS_FILES = ("pyproject.toml", "uv.lock", "pnpm-lock.yaml", "pnpm-workspace.yaml")
+DEPS_FILES = (
+    ".python-version",
+    "pyproject.toml",
+    "uv.lock",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+)
 WEBUI_UNIT = "ghrah-observer-webui"
 # dev 会话自身的日志（与 start 的 <distro>/logs/<token>.log 对齐）
 LOGFILE = "dev.log"
@@ -269,7 +281,8 @@ def _resolve_context(args: argparse.Namespace) -> DevContext:
             "distro.toml 未配置源仓路径（[distro.repo].path）；dev 需要源仓工作树" + hint
         )
     repo = Path(repo_path).expanduser()
-    if not (repo / ".git").is_dir():
+    top = _git(repo, "rev-parse", "--show-toplevel")
+    if top.returncode or Path(top.stdout.strip()).resolve() != repo.resolve():
         raise ToolchainError(
             f"源仓无效（需 git 工作树）: {repo}；检查 distro.toml [distro.repo].path"
         )
@@ -302,7 +315,27 @@ def _build_wheels_subset(src: Path, wheels_dir: Path, packages: list[str]) -> li
     return wheels
 
 
-def _build_full(src: Path, artifacts: Path) -> None:
+def _dev_catalog(src: Path) -> str | None:
+    """按源码的默认发行版生成 catalog，旧清单保留无 catalog 路径。"""
+    return None if _is_legacy_source(src) else _render_catalog(build_catalog(src))
+
+
+def _catalog_current(directory: Path, catalog: str | None) -> bool:
+    path = directory / CATALOG_FILE
+    if catalog is None:
+        return not (path.exists() or path.is_symlink())
+    return not path.is_symlink() and path.is_file() and path.read_bytes() == catalog.encode("utf-8")
+
+
+def _refresh_dev_catalog(directory: Path, catalog: str | None) -> None:
+    path = directory / CATALOG_FILE
+    if catalog is None:
+        path.unlink(missing_ok=True)
+    elif not _catalog_current(directory, catalog):
+        atomic_write(path, catalog)
+
+
+def _build_full(src: Path, artifacts: Path, catalog: str | None) -> None:
     """全量：五包 wheels + pins + webui（tarballs + observer-web dist）→ 原子落位。"""
     tmp = artifacts.parent / f"{ARTIFACTS}.tmp-{os.getpid()}"
     _rmtree(tmp) if tmp.exists() else None
@@ -310,6 +343,7 @@ def _build_full(src: Path, artifacts: Path) -> None:
         _build_wheels(src, tmp / "wheels")
         _export_pins(src, tmp / "wheels")
         _build_webui(src, tmp / "tarballs", tmp)
+        _refresh_dev_catalog(tmp, catalog)
         if artifacts.exists():
             _rmtree(artifacts)
         artifacts.parent.mkdir(parents=True, exist_ok=True)
@@ -342,15 +376,15 @@ def _gen_ready(gen: Path) -> bool:
     return _venv_python(gen / "env" / ".venv").is_file()
 
 
-def _materialize_dev(distro_root: Path, artifacts: Path, gen: Path) -> None:
+def _materialize_dev(distro_root: Path, artifacts: Path, gen: Path, *, python: str) -> None:
     """全量物化 .dev/gen/env/.venv（staging + 原子落位；不含 webui node 环境）。"""
     staging = gen.parent / f"{GEN}.tmp-{os.getpid()}"
     _rmtree(staging) if staging.exists() else None
     try:
-        # dev 产物树没有 manifest.json：解释器直接钉运行时下限版本。
-        _install_python_env(
-            distro_root, artifacts, staging / "env" / ".venv", python=RUNTIME_PYTHON
-        )
+        _install_python_env(distro_root, artifacts, staging / "env" / ".venv", python=python)
+        catalog = artifacts / CATALOG_FILE
+        if catalog.is_file():
+            shutil.copyfile(catalog, staging / CATALOG_FILE)
         if gen.exists():
             _rmtree(gen)
         gen.parent.mkdir(parents=True, exist_ok=True)
@@ -360,13 +394,18 @@ def _materialize_dev(distro_root: Path, artifacts: Path, gen: Path) -> None:
         raise
 
 
-def _upgrade_dev(distro_root: Path, artifacts: Path, gen: Path, packages: list[str]) -> None:
-    """增量升级：把变化包的 wheel 覆盖进既有 dev venv（其余不动）。"""
-    py = _venv_python(gen / "env" / ".venv")
-    wheels = [_wheel_for(artifacts, pkg) for pkg in packages]
-    cmd = ["uv", "pip", "install", "--force-reinstall", "--no-deps", f"--python={py}"]
-    cmd += [str(w) for w in wheels]
-    _run(cmd, env=_uv_env(distro_root))
+def _upgrade_dev(
+    distro_root: Path, artifacts: Path, gen: Path, packages: list[str], catalog: str | None
+) -> None:
+    """安装发生变化的 wheel，随后刷新产物和开发代中的 catalog。"""
+    if packages:
+        py = _venv_python(gen / "env" / ".venv")
+        wheels = [_wheel_for(artifacts, pkg) for pkg in packages]
+        cmd = ["uv", "pip", "install", "--force-reinstall", "--no-deps", f"--python={py}"]
+        cmd += [str(w) for w in wheels]
+        _run(cmd, env=_uv_env(distro_root))
+    _refresh_dev_catalog(artifacts, catalog)
+    _refresh_dev_catalog(gen, catalog)
 
 
 def _smoke(gen: Path) -> None:
@@ -633,9 +672,7 @@ def dev_status(ctx: DevContext) -> int:
         if py:
             print(f"[dev]   Python 包: {', '.join(py)}")
         if deps:
-            print(
-                "[dev]   依赖配置: pyproject.toml / uv.lock / pnpm-lock.yaml / pnpm-workspace.yaml"
-            )
+            print(f"[dev]   依赖配置: {' / '.join(DEPS_FILES)}")
         if webui:
             print(f"[dev]   前端代码: {WEBUI_UNIT}")
     if _dev_session_alive(ctx):
@@ -654,6 +691,8 @@ def dev_run(
     state = _load_state(ctx.dev_root)
     gen = ctx.gen
     artifacts = ctx.artifacts
+    catalog = _dev_catalog(ctx.repo)
+    catalog_changed = not all(_catalog_current(path, catalog) for path in (artifacts, gen))
 
     deps_changed = state is not None and state.get("units", {}).get("deps") != fp["deps"]
     py_changed = [
@@ -669,41 +708,40 @@ def dev_run(
         or not pins_ok
         or not _gen_ready(gen)
     )
-    needs_build = do_full or bool(py_changed)
+    needs_build = do_full or bool(py_changed) or catalog_changed
 
     if needs_build:
-        work = ctx.dev_root / WORK
-        work.mkdir(parents=True, exist_ok=True)
-        src = work / f"src-{os.getpid()}"
+        src = ctx.dev_root / WORK / f"src-{os.getpid()}"
 
         try:
-            print(f"[dev] 复制当前本地代码用于构建 → {src}", flush=True)
-            _snapshot_worktree(ctx.repo, src)
+            if do_full or py_changed:
+                print(f"[dev] 复制当前本地代码用于构建 → {src}", flush=True)
+                _snapshot_worktree(ctx.repo, src)
+                catalog = _dev_catalog(src)
 
             if do_full:
                 print(
                     "[dev] 构建全部 Python 安装包、依赖版本清单和前端页面（可能需要数分钟）…",
                     flush=True,
                 )
-                _build_full(src, artifacts)
-                rebuild_packages = list(PYTHON_PACKAGES)
-            else:
+                _build_full(src, artifacts, catalog)
+            elif py_changed:
                 print(f"[dev] 只构建有改动的 Python 包（{', '.join(py_changed)}）…", flush=True)
                 _build_incremental(src, artifacts, py_changed)
-                rebuild_packages = py_changed
 
             # Windows 文件锁：先停旧 dev（释放 dev venv），再 install
             _stop_dev_session(ctx)
 
-            if do_full or not _gen_ready(gen):
+            if do_full:
                 print("[dev] 创建开发用 Python 环境并安装全部依赖 …", flush=True)
-                _materialize_dev(ctx.distro_root, artifacts, gen)
+                _materialize_dev(ctx.distro_root, artifacts, gen, python=_source_python(src))
             else:
-                print("[dev] 将有改动的 Python 包安装到开发环境 …", flush=True)
-                _upgrade_dev(ctx.distro_root, artifacts, gen, rebuild_packages)
+                print("[dev] 更新开发环境与代内目录 …", flush=True)
+                _upgrade_dev(ctx.distro_root, artifacts, gen, py_changed, catalog)
 
-            print("[dev] 检查五个 Python 包能否导入，以及后端启动程序是否存在…", flush=True)
-            _smoke(gen)
+            if do_full or py_changed:
+                print("[dev] 检查 Python 包能否导入，以及后端启动程序是否存在…", flush=True)
+                _smoke(gen)
         finally:
             _rmtree(src) if src.exists() else None
 

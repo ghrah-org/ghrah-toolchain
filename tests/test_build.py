@@ -26,8 +26,10 @@ import pytest
 
 import ghrah_toolchain.build as bld
 from ghrah_toolchain.build import build_artifacts, normalize_commit, verify_artifacts
+from ghrah_toolchain.catalog import catalog_digest
 from ghrah_toolchain.cli import main
 from ghrah_toolchain.errors import BuildError
+from ghrah_toolchain.manifest import ManifestError
 
 # ── fixtures 小仓 ────────────────────────────────────────────
 
@@ -129,6 +131,46 @@ def _write_webui(root: Path) -> None:
     )
 
 
+def _write_system_declarations(repo: Path) -> None:
+    """给 fixtures 仓补上 system/identity 与 [kernel]/[providers]/[entries]。
+
+    声明全部指向 fixtures 自己的包与入口（``pkg-a`` / ``fake-server``），
+    这样 catalog 组装走的是真实代码路径，而入口名仍能在临时 venv 里找到。
+    """
+    component = repo / _PY_PKG / "component.toml"
+    component.write_text(
+        'schema = 1\nid = "pkg-a"\nversion = "0.1.0"\n\n'
+        '[kernel]\nmodule = "ghrah_fake"\nentry = "app"\n\n'
+        '[entries.host]\nkind = "process"\nargv = ["fake-server"]\n\n'
+        '[providers.helper]\nmodule = "ghrah_fake.app"\nprovider = "helper"\n'
+        'kind = "namespace"\norder = 0\nrestart = "never"\n\n'
+        '[providers.helper.schemes.core]\ncontract = "ghrah.example/v0"\nactions = ["ping"]\n',
+        encoding="utf-8",
+    )
+    (repo / "ghrah.toml").write_text(
+        "schema = 1\n\n"
+        '[workspace]\nname = "fake"\nversion = "0.1.0"\ndefault_distro = "demo"\n'
+        "native_locks = []\n\n"
+        '[components.pkg-a]\npath = "pkg-a"\n\n'
+        '[distro.demo]\ncomponents = ["pkg-a"]\nroots = ["subject/host"]\n\n'
+        '[distro.demo.instances.subject]\ncomponent = "pkg-a"\nhost = "process"\n'
+        'host_entry = "subject/host"\n\n'
+        '[distro.demo.system]\nhost_instance = "subject"\nkernel = "pkg-a"\n\n'
+        '[[distro.demo.system.providers]]\nid = "pkg-a:helper"\n'
+        'principal = \'["local","svc"]\'\n\n'
+        '[distro.demo.identity]\ngrant_lifetime = { mode = "instance" }\n'
+        "subjects = [\n"
+        '    { issuer = "local", subject_id = "admin", kind = "user" },\n'
+        '    { issuer = "local", subject_id = "svc", kind = "service" },\n'
+        "]\ngroups = []\n"
+        'namespaces = [{ namespace_id = "main", owner = \'["local","admin"]\' }]\n'
+        'scopes = [{ scope_id = "main", namespaces = ["main"], '
+        'subjects = [\'["local","admin"]\', \'["local","svc"]\'] }]\n'
+        "access = []\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture
 def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """小 fixtures 仓：单 Python 包（含 entry）+ 根级 pnpm workspace。"""
@@ -137,6 +179,7 @@ def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     repo.mkdir()
     _write_py_pkg(repo)
     _write_webui(repo)
+    _write_system_declarations(repo)
     # 根 pyproject：uv workspace（uv export 消费）
     (repo / "pyproject.toml").write_text(
         "[project]\n"
@@ -169,7 +212,7 @@ def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(bld, "WEBUI_PACK_TARBALLS", (f"@ghrah/{_WEB_BUILT}",))
     monkeypatch.setattr(bld, "OBSERVER_WEB_COPY", ("dist", "public", "package.json"))
     monkeypatch.setattr(bld, "VERIFY_IMPORTS", f"import {_PY_MODULE}")
-    monkeypatch.setattr(bld, "VERIFY_ENTRY_POINT", "fake-server")
+    monkeypatch.setattr(bld, "LEGACY_ENTRY_POINT", "fake-server")
     return repo
 
 
@@ -249,6 +292,85 @@ class TestBuildArtifacts:
         assert not out.exists()
         assert not list(tmp_path.glob("out.tmp-*")), "staging 残留"
 
+    @pytest.mark.parametrize("entrypoint", ["api", "cli"])
+    def test_legacy_manifest_builds_without_catalog(
+        self, fake_repo: Path, tmp_path: Path, entrypoint: str
+    ) -> None:
+        """旧清单可沿用默认构建，复验仍能找到旧入口。"""
+        _require("pnpm")
+        manifest = fake_repo / "ghrah.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").split("[distro.demo.system]", 1)[0],
+            encoding="utf-8",
+        )
+        _git(fake_repo, "add", "-A")
+        _git(fake_repo, "commit", "-qm", "legacy declarations")
+        out = tmp_path / "out"
+        if entrypoint == "api":
+            result = build_artifacts(fake_repo, "HEAD", out_dir=out)
+            assert result.catalog is None
+            assert result.distro is None
+            verify_artifacts(out)
+        else:
+            assert main(["build", "--repo", str(fake_repo), "--out", str(out)]) == 0
+        assert not (out / "catalog.json").exists()
+        assert "catalog" not in _manifest(out)
+
+    def test_declared_system_produces_catalog(self, fake_repo: Path, tmp_path: Path) -> None:
+        """清单声明 system/identity 后，代内目录必须产出并进入清单与验收。"""
+        _require("pnpm")
+        out = tmp_path / "out"
+        result = _build(fake_repo, out)
+
+        assert result.catalog is not None
+        assert result.distro == "demo"
+        catalog_path = out / "catalog.json"
+        assert catalog_path.is_file()
+        manifest = _manifest(out)
+        assert manifest["catalog"]["file"] == "catalog.json"
+        assert (
+            manifest["catalog"]["sha256"] == hashlib.sha256(catalog_path.read_bytes()).hexdigest()
+        )
+
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        # 入口从声明推导，不是工具链常量
+        assert catalog["host"]["command"] == ["fake-server"]
+        assert catalog["distro"] == "demo"
+        verify_artifacts(out)
+
+    def test_tampered_catalog_fails_verify(self, fake_repo: Path, tmp_path: Path) -> None:
+        """V5：篡改 catalog 后验收必须失败，不得静默通过。"""
+        _require("pnpm")
+        out = tmp_path / "out"
+        _build(fake_repo, out)
+
+        catalog_path = out / "catalog.json"
+        body = json.loads(catalog_path.read_text(encoding="utf-8"))
+        body["distro"] = "tampered"
+        catalog_path.write_text(
+            json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        with pytest.raises(BuildError):
+            verify_artifacts(out)
+
+    def test_missing_digest_match_fails_verify(self, fake_repo: Path, tmp_path: Path) -> None:
+        """摘要不符同样拦下：校验方重算，不只信文件里的值。"""
+        _require("pnpm")
+        out = tmp_path / "out"
+        _build(fake_repo, out)
+
+        catalog_path = out / "catalog.json"
+        body = json.loads(catalog_path.read_text(encoding="utf-8"))
+        body["digest"] = "sha256:" + "0" * 64
+        catalog_path.write_text(
+            json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        manifest = _manifest(out)
+        manifest["catalog"]["sha256"] = hashlib.sha256(catalog_path.read_bytes()).hexdigest()
+        (out / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(BuildError, match="digest 与重算值不符"):
+            verify_artifacts(out)
+
     def test_u6_nonempty_out_rejected(self, fake_repo: Path, tmp_path: Path) -> None:
         out = tmp_path / "out"
         out.mkdir()
@@ -312,6 +434,36 @@ class TestBuildArtifacts:
 
 
 class TestVerifyArtifacts:
+    @pytest.mark.parametrize("entry", [None, [], "catalog.json", {}, {"file": "../catalog.json"}])
+    def test_malformed_catalog_entry_is_rejected(self, tmp_path: Path, entry: object) -> None:
+        pins = tmp_path / "pins.txt"
+        pins.write_bytes(b"")
+        manifest = {
+            "python": {"wheels": [], "pins_file": pins.name, "pins_sha256": bld._sha256_file(pins)},
+            "web": {"tarballs": []},
+            "catalog": entry,
+        }
+        (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(BuildError, match="catalog 条目"):
+            verify_artifacts(tmp_path)
+
+    def test_existing_catalog_requires_a_manifest_entry(self, tmp_path: Path) -> None:
+        (tmp_path / "catalog.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(BuildError, match="缺少现有 catalog.json 的条目"):
+            bld._verify_catalog(tmp_path, {})
+
+    def test_verify_rejects_invalid_identity_with_valid_hashes(self, tmp_path: Path) -> None:
+        golden = Path(__file__).with_name("catalog_golden.json")
+        catalog = json.loads(golden.read_text(encoding="utf-8"))
+        del catalog["identity"]["access"]
+        catalog["digest"] = catalog_digest(catalog)
+        path = tmp_path / "catalog.json"
+        path.write_text(json.dumps(catalog), encoding="utf-8")
+        manifest = {"catalog": {"file": path.name, "sha256": bld._sha256_file(path)}}
+        with pytest.raises(ManifestError, match=r"catalog\.json:identity:.*'access'") as excinfo:
+            bld._verify_catalog(tmp_path, manifest)
+        assert excinfo.value.exit_code == 3
+
     def test_verify_detects_tamper(self, fake_repo: Path, tmp_path: Path) -> None:
         _require("pnpm")
         out = tmp_path / "out"
@@ -385,6 +537,106 @@ class TestBuildIntegration:
         )
         assert rc == 0
         assert (tmp_path / "b" / "BOOTSTRAP.toml").is_file()
+
+
+# ── CLI 面（fixtures 仓，不依赖真实 monorepo）───────────────
+
+
+class TestBuildCli:
+    @pytest.mark.parametrize(
+        ("case", "expected"),
+        [
+            ("unknown-distro", "E-CAT-DISTRO"),
+            ("no-default", "E-CAT-DISTRO"),
+            ("legacy-no-default", "E-CAT-DISTRO"),
+            ("unparsable", "E-CAT-PARSE"),
+            ("explicit-legacy", "E-CAT-SYSTEM"),
+            ("partial-identity", "E-CAT-SYSTEM"),
+            ("bad-system", "E-CAT-SCHEMA"),
+        ],
+    )
+    def test_cli_rejects_invalid_catalog_inputs_before_packaging(
+        self,
+        fake_repo: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        case: str,
+        expected: str,
+    ) -> None:
+        manifest = fake_repo / "ghrah.toml"
+        original = manifest.read_text(encoding="utf-8")
+        legacy = original.split("[distro.demo.system]", 1)[0]
+        body = {
+            "unknown-distro": original,
+            "no-default": original.replace('default_distro = "demo"\n', ""),
+            "legacy-no-default": legacy.replace('default_distro = "demo"\n', ""),
+            "unparsable": "schema = ",
+            "explicit-legacy": legacy,
+            "partial-identity": legacy + original[original.index("[distro.demo.identity]") :],
+            "bad-system": legacy.replace(
+                'roots = ["subject/host"]', 'roots = ["subject/host"]\nsystem = 7'
+            ),
+        }[case]
+        if body != original:
+            manifest.write_text(body, encoding="utf-8")
+            _git(fake_repo, "add", "-A")
+            _git(fake_repo, "commit", "-qm", case)
+        monkeypatch.setattr(bld, "_build_wheels", lambda *_: pytest.fail("unexpected packaging"))
+        out = tmp_path / "out"
+        args = ["build", "--repo", str(fake_repo), "--out", str(out), "--no-verify"]
+        if case == "unknown-distro":
+            args.extend(["--distro", "typo"])
+        elif case == "explicit-legacy":
+            args.extend(["--distro", "demo"])
+        assert main(args) == 3
+        assert expected in capsys.readouterr().err
+        assert not out.exists()
+        assert not list(tmp_path.glob("out.tmp-*"))
+
+    def test_cli_build_accepts_distro(
+        self, fake_repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`build --distro` 是发行版名（区别于 dev 的实例名）。"""
+        _require("pnpm")
+        out = tmp_path / "b"
+        rc = main(["build", "--repo", str(fake_repo), "--out", str(out), "--distro", "demo"])
+        assert rc == 0
+        assert "代内目录: catalog.json（发行版 demo）" in capsys.readouterr().out
+
+    def test_cli_build_reports_all_diagnostics(
+        self, fake_repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """清单错误走 exit 3，且逐行打印全部诊断（不折叠成一行）。"""
+        # 造三处互相独立的错误：双管理员、namespace 重启策略、未知依赖目标
+        manifest = fake_repo / "ghrah.toml"
+        body = manifest.read_text(encoding="utf-8")
+        body = body.replace(
+            '{ issuer = "local", subject_id = "svc", kind = "service" },',
+            '{ issuer = "local", subject_id = "svc", kind = "service" },\n'
+            '    { issuer = "local", subject_id = "admin2", kind = "user" },',
+        )
+        manifest.write_text(body, encoding="utf-8")
+        component = fake_repo / _PY_PKG / "component.toml"
+        component.write_text(
+            component.read_text(encoding="utf-8").replace(
+                'restart = "never"', 'restart = "on_failure"\nafter = ["pkg-a:absent"]'
+            ),
+            encoding="utf-8",
+        )
+        _git(fake_repo, "add", "-A")
+        _git(fake_repo, "commit", "-qm", "broken declarations")
+
+        rc = main(["build", "--repo", str(fake_repo), "--out", str(tmp_path / "b")])
+        captured = capsys.readouterr()
+        assert rc == 3
+        lines = [line for line in (captured.err + captured.out).splitlines() if "E-" in line]
+        assert len(lines) >= 3, f"应一次报全部诊断，实际: {lines}"
+        # 诊断格式是 ``<文件>:[<字段>] <错误码>: <说明>``，错误码后紧跟冒号
+        codes = {
+            token.rstrip(":") for line in lines for token in line.split() if token.startswith("E-")
+        }
+        assert {"E-SYS-CALLERS", "E-PROV-POLICY", "E-PROV-DEPENDENCY"} <= codes
 
 
 # ── pnpm 调用统一（nt 模拟，纯 mock 命令形态） ────────
