@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""contract v0：代内 catalog 的构建期汇总与校验（P1-9b）。
+"""代内 catalog 的构建期汇总与校验。
 
 这些用例覆盖 catalog.py 的纯计算面：诊断格式、一次报全的收集顺序、摘要
-规范化。安装域与代目录落位属 P1-9c。``identity`` 的跨文件引用另组用例，
-验证离线 registry 能解析 workspace 的 ``$anchor``。
+规范化。安装域与代目录落位不在本模块范围内。``identity`` 的跨文件引用
+另组用例，验证离线 registry 能解析 workspace 的 ``$anchor``。
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def test_catalog_schema_constant() -> None:
 
 
 def test_diagnostic_render_matches_contract_format() -> None:
-    """契约 §4.2：``<文件>:[<字段路径>] <错误码>: <说明>``。"""
+    """诊断渲染：``<文件>:[<字段路径>] <错误码>: <说明>``。"""
     diag = Diagnostic(
         file="ghrah-kernel/component.toml",
         path="providers.namespace.restart",
@@ -67,7 +67,7 @@ def test_catalog_error_carries_all_diagnostics_line_by_line() -> None:
 
 
 def test_diagnostic_sort_key_orders_by_file_then_path() -> None:
-    """契约 §4.1 的收集顺序：类别序 → 文件路径 → 字段路径。"""
+    """收集顺序：类别序 → 文件路径 → 字段路径。"""
     diagnostics = [
         Diagnostic(file="b/component.toml", path="providers.a", code="E-PROV-CONFIG", message="m"),
         Diagnostic(file="a/component.toml", path="providers.z", code="E-PROV-CONFIG", message="m"),
@@ -98,7 +98,7 @@ def test_catalog_digest_ignores_digest_field() -> None:
 
 
 def test_catalog_digest_is_sha256_of_canonical_body() -> None:
-    """校验方必须重算，不得只信任文件里的 digest（契约 §5.9 第 3 条）。"""
+    """校验方必须重算，不得只信任文件里的 digest。"""
     body = {"schema": 1, "workspace": {"name": "ghrah", "version": "0.2.0"}}
     digest = catalog_digest(dict(body, digest="sha256:" + "0" * 64))
     assert digest.startswith("sha256:")
@@ -123,7 +123,7 @@ def test_diagnostics_are_json_serialisable_for_cli_json_mode() -> None:
     ]
 
 
-# ── B3：schema 聚合 ────────────────────────────────────────
+# ── schema 聚合 ────────────────────────────────────────────
 
 _VALID_MANIFEST = """schema = 1
 
@@ -189,7 +189,7 @@ def test_component_schema_error_uses_component_relative_path(tmp_path: Path) -> 
 
 
 def test_multiple_schema_errors_are_all_collected(tmp_path: Path) -> None:
-    """契约 §4.1 一次报全：不得只报首错。"""
+    """一次报全：不得只报首错。"""
     broken = _VALID_COMPONENT.replace('id = "kernel"\n', "").replace('version = "0.1.0a0"\n', "")
     root = _workspace(tmp_path, component=broken)
     _, _, diagnostics = collect_schema_diagnostics(root)
@@ -213,7 +213,7 @@ def test_missing_component_toml_is_reported(tmp_path: Path) -> None:
     assert {d.file for d in diagnostics} == {"kernel/component.toml"}
 
 
-# ── B4/B5：语义校验总入口 ──────────────────────────────────
+# ── 语义校验总入口 ────────────────────────────────────────
 
 _FULL_COMPONENT = """schema = 1
 id = "kernel"
@@ -305,7 +305,7 @@ def test_full_valid_declaration_has_no_diagnostics(tmp_path: Path) -> None:
 
 
 def test_missing_distro_selection_is_rejected(tmp_path: Path) -> None:
-    """契约 §5.3：不猜默认发行版。"""
+    """不猜默认发行版。"""
     manifest = _FULL_MANIFEST.replace('default_distro = "demo"\n', "")
     root = _full(tmp_path, manifest=manifest)
     assert "E-CAT-DISTRO" in _codes(root)
@@ -333,7 +333,7 @@ def test_missing_system_is_rejected(tmp_path: Path) -> None:
 
 
 def test_namespace_must_be_first(tmp_path: Path) -> None:
-    """§4.3.3：排序后首位须为 namespace。"""
+    """排序后首位须为 namespace。"""
     component = (
         _FULL_COMPONENT.replace("order = 10", "order = 20")
         + """
@@ -362,7 +362,7 @@ principal = '["local","ns"]'
 
 
 def test_duplicate_contract_action_is_rejected(tmp_path: Path) -> None:
-    """§4.3.1：(contract, action) 全表唯一。"""
+    """(contract, action) 全表唯一。"""
     component = (
         _FULL_COMPONENT
         + """
@@ -389,7 +389,7 @@ principal = '["local","ns"]'
 
 
 def test_unknown_dependency_target_is_rejected(tmp_path: Path) -> None:
-    """§4.3.2：after 目标须为已启用 id。"""
+    """after 目标须为已启用 id。"""
     component = _FULL_COMPONENT.replace(
         'restart = "never"', 'restart = "never"\nafter = ["kernel:absent"]'
     )
@@ -398,7 +398,7 @@ def test_unknown_dependency_target_is_rejected(tmp_path: Path) -> None:
 
 
 def test_dependency_cycle_is_rejected(tmp_path: Path) -> None:
-    """§4.3.2：依赖图无环。"""
+    """依赖图无环。"""
     component = (
         _FULL_COMPONENT.replace(
             'restart = "never"', 'restart = "never"\nrequires_ready = ["kernel:loop"]'
@@ -428,14 +428,14 @@ principal = '["local","ns"]'
 
 
 def test_namespace_restart_must_be_never(tmp_path: Path) -> None:
-    """§4.3.4 汇总层：namespace ⇒ restart="never"。"""
+    """汇总层：namespace ⇒ restart="never"。"""
     component = _FULL_COMPONENT.replace('restart = "never"', 'restart = "on_failure"')
     root = _full(tmp_path, component=component)
     assert "E-PROV-POLICY" in _codes(root)
 
 
 def test_close_action_must_belong_to_own_schemes(tmp_path: Path) -> None:
-    """§4.3.4 汇总层：close_action 的 (scheme, action) 属于本服务 schemes。"""
+    """汇总层：close_action 的 (scheme, action) 属于本服务 schemes。"""
     component = _FULL_COMPONENT.replace(
         'restart = "never"', 'restart = "never"\nclose_action = ["ns", "absent"]'
     )
@@ -444,7 +444,7 @@ def test_close_action_must_belong_to_own_schemes(tmp_path: Path) -> None:
 
 
 def test_binding_to_undeclared_scope_is_rejected(tmp_path: Path) -> None:
-    """§4.3.5：bindings.scope 须在 identity.scopes 中。"""
+    """bindings.scope 须在 identity.scopes 中。"""
     component = (
         _FULL_COMPONENT
         + """
@@ -467,7 +467,7 @@ def _component_with_configuration() -> str:
 
 
 def test_configuration_absolute_path_is_rejected(tmp_path: Path) -> None:
-    """§4.3.6：展开前的绝对路径一律拒绝。"""
+    """展开前的绝对路径一律拒绝。"""
     root = _full(tmp_path, component=_component_with_configuration())
     (root / "kernel" / "ns.json").write_text(
         json.dumps({"database": "/home/u/main.db"}), encoding="utf-8"
@@ -476,7 +476,7 @@ def test_configuration_absolute_path_is_rejected(tmp_path: Path) -> None:
 
 
 def test_configuration_reserved_key_is_rejected(tmp_path: Path) -> None:
-    """§4.3.6 第 4 条：保留键不得出现在声明里。"""
+    """保留键不得出现在声明里。"""
     root = _full(tmp_path, component=_component_with_configuration())
     (root / "kernel" / "ns.json").write_text(
         json.dumps({"principal": '["local","ns"]'}), encoding="utf-8"
@@ -485,7 +485,7 @@ def test_configuration_reserved_key_is_rejected(tmp_path: Path) -> None:
 
 
 def test_configuration_reserved_token_is_rejected(tmp_path: Path) -> None:
-    """§4.3.6 第 3 条：宿主保留参数不得作为独立 token 出现。"""
+    """宿主保留参数不得作为独立 token 出现。"""
     root = _full(tmp_path, component=_component_with_configuration())
     (root / "kernel" / "ns.json").write_text(
         json.dumps({"args": ["--credential=x"]}), encoding="utf-8"
@@ -494,7 +494,7 @@ def test_configuration_reserved_token_is_rejected(tmp_path: Path) -> None:
 
 
 def test_placeholder_is_not_expanded(tmp_path: Path) -> None:
-    """§5.7：构建期保留占位符原样，不展开。"""
+    """构建期保留占位符原样，不展开。"""
     root = _full(tmp_path, component=_component_with_configuration())
     (root / "kernel" / "ns.json").write_text(
         json.dumps({"database": "${DATA_ROOT}/agent/main.db"}), encoding="utf-8"
@@ -509,7 +509,7 @@ def test_configuration_missing_file_is_reported(tmp_path: Path) -> None:
 
 
 def test_service_principal_must_not_be_user(tmp_path: Path) -> None:
-    """§4.6 第 4 条：服务运行主体不能是 user。"""
+    """服务运行主体不能是 user。"""
     manifest = _FULL_MANIFEST.replace(
         """[[distro.demo.system.providers]]
 id = "kernel:namespace"
@@ -523,7 +523,7 @@ principal = '["local","admin"]'""",
 
 
 def test_undeclared_principal_is_rejected(tmp_path: Path) -> None:
-    """§4.6 第 3 条：principal 须解析到 identity.subjects。"""
+    """principal 须解析到 identity.subjects。"""
     manifest = _FULL_MANIFEST.replace(
         'principal = \'["local","ns"]\'', 'principal = \'["local","ghost"]\''
     )
@@ -532,7 +532,7 @@ def test_undeclared_principal_is_rejected(tmp_path: Path) -> None:
 
 
 def test_missing_binding_record_is_rejected(tmp_path: Path) -> None:
-    """§4.6 第 2 条：每个启用服务恰一条绑定记录。"""
+    """每个启用服务恰一条绑定记录。"""
     manifest = _FULL_MANIFEST.replace('id = "kernel:namespace"', 'id = "kernel:other"')
     root = _full(tmp_path, manifest=manifest)
     with pytest.raises(CatalogError, match="E-SYS-IDENTITY.*kernel:namespace.*缺少绑定记录"):
@@ -540,7 +540,7 @@ def test_missing_binding_record_is_rejected(tmp_path: Path) -> None:
 
 
 def test_resolution_scope_must_be_open_to_principal(tmp_path: Path) -> None:
-    """§4.6 第 5 条：scope 的 subjects 须含该 principal。"""
+    """scope 的 subjects 须含该 principal。"""
     manifest = _FULL_MANIFEST.replace(
         'principal = \'["local","ns"]\'',
         'principal = \'["local","ns"]\'\nresolution_scope = "main"',
@@ -553,7 +553,7 @@ def test_resolution_scope_must_be_open_to_principal(tmp_path: Path) -> None:
 
 
 def test_kernel_component_must_declare_kernel_section(tmp_path: Path) -> None:
-    """§4.6 第 7 条：system.kernel 组件须声明 [kernel]。"""
+    """system.kernel 组件须声明 [kernel]。"""
     component = _FULL_COMPONENT.replace(
         '[kernel]\nmodule = "ghrah_kernel"\nentry = "_kernel"\n\n', ""
     )
@@ -562,21 +562,21 @@ def test_kernel_component_must_declare_kernel_section(tmp_path: Path) -> None:
 
 
 def test_host_instance_must_exist(tmp_path: Path) -> None:
-    """§4.6 第 8 条：host_instance 指向存在的实例。"""
+    """host_instance 指向存在的实例。"""
     manifest = _FULL_MANIFEST.replace('host_instance = "subject"', 'host_instance = "absent"')
     root = _full(tmp_path, manifest=manifest)
     assert "E-SYS-HOST" in _codes(root)
 
 
 def test_host_entry_must_be_declared(tmp_path: Path) -> None:
-    """§4.6 第 8 条：不猜默认入口。"""
+    """不猜默认入口。"""
     manifest = _FULL_MANIFEST.replace('host_entry = "subject/host"\n', "")
     root = _full(tmp_path, manifest=manifest)
     assert "E-SYS-HOST" in _codes(root)
 
 
 def test_multiple_admins_are_rejected_by_callers_rule(tmp_path: Path) -> None:
-    """契约 §3.4：v0 只支持单管理员。"""
+    """v0 只支持单管理员。"""
     manifest = _FULL_MANIFEST.replace(
         '{ issuer = "local", subject_id = "ns", kind = "service" },',
         '{ issuer = "local", subject_id = "ns", kind = "service" },\n'
@@ -668,7 +668,7 @@ def test_catalog_rejects_component_outside_workspace(tmp_path: Path) -> None:
         build_catalog(root)
 
 
-# ── B6：组装（契约 §5.2 / §5.10）────────────────────────────
+# ── 组装 ───────────────────────────────────────────────────
 
 
 def test_build_catalog_produces_contract_shape(tmp_path: Path) -> None:
@@ -680,7 +680,7 @@ def test_build_catalog_produces_contract_shape(tmp_path: Path) -> None:
 
 
 def test_build_catalog_host_and_kernel_come_from_declarations(tmp_path: Path) -> None:
-    """§5.10：kernel.module/entry 来自组件 [kernel]，不是工具链常量。"""
+    """kernel.module/entry 来自组件 [kernel]，不是工具链常量。"""
     root = _full(tmp_path)
     catalog = build_catalog(root)
     assert catalog["host"] == {
@@ -697,7 +697,7 @@ def test_build_catalog_host_and_kernel_come_from_declarations(tmp_path: Path) ->
 
 
 def test_build_catalog_service_is_sparse(tmp_path: Path) -> None:
-    """§5.5：可选字段声明了才出现；bindings/configuration 恒有。"""
+    """可选字段声明了才出现；bindings/configuration 恒有。"""
     root = _full(tmp_path)
     catalog = build_catalog(root)
     service = catalog["services"][0]
@@ -711,7 +711,7 @@ def test_build_catalog_service_is_sparse(tmp_path: Path) -> None:
 
 
 def test_build_catalog_binding_comes_from_deployer_record(tmp_path: Path) -> None:
-    """§5.5：binding 唯一来源是 system.providers；diagnostics 恒 false。"""
+    """binding 唯一来源是 system.providers；diagnostics 恒 false。"""
     root = _full(tmp_path)
     catalog = build_catalog(root)
     binding = catalog["services"][0]["binding"]
@@ -723,7 +723,7 @@ def test_build_catalog_binding_comes_from_deployer_record(tmp_path: Path) -> Non
 
 
 def test_build_catalog_callers_derived_from_single_admin(tmp_path: Path) -> None:
-    """§3.4：首个 user 主体 + 首个 scope；只有 control 带诊断许可。"""
+    """首个 user 主体 + 首个 scope；只有 control 带诊断许可。"""
     root = _full(tmp_path)
     catalog = build_catalog(root)
     assert catalog["callers"]["control"] == {
@@ -749,7 +749,7 @@ def test_build_catalog_schemes_become_array_in_declaration_order(tmp_path: Path)
 
 
 def test_build_catalog_digest_is_recomputable(tmp_path: Path) -> None:
-    """§5.9 第 3 条：校验方重算摘要，不得只信文件里的值。"""
+    """校验方重算摘要，不得只信文件里的值。"""
     root = _full(tmp_path)
     catalog = build_catalog(root)
     assert catalog["digest"] == catalog_digest(catalog)
@@ -758,7 +758,7 @@ def test_build_catalog_digest_is_recomputable(tmp_path: Path) -> None:
 
 
 def test_build_catalog_keeps_placeholder_unexpanded(tmp_path: Path) -> None:
-    """§5.7：占位符原样进 catalog，由宿主在映射时展开。"""
+    """占位符原样进 catalog，由宿主在映射时展开。"""
     root = _full(tmp_path, component=_component_with_configuration())
     (root / "kernel" / "ns.json").write_text(
         json.dumps({"database": "${DATA_ROOT}/agent/main.db"}), encoding="utf-8"

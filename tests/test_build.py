@@ -339,7 +339,7 @@ class TestBuildArtifacts:
         verify_artifacts(out)
 
     def test_tampered_catalog_fails_verify(self, fake_repo: Path, tmp_path: Path) -> None:
-        """V5：篡改 catalog 后验收必须失败，不得静默通过。"""
+        """篡改 catalog 后验收必须失败，不得静默通过。"""
         _require("pnpm")
         out = tmp_path / "out"
         _build(fake_repo, out)

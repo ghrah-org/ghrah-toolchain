@@ -279,7 +279,7 @@ def _render_catalog(catalog: dict) -> str:
 
 
 def _write_catalog(src: Path, staging: Path, *, distro: str | None) -> tuple[Path, str]:
-    """按 §5.10 汇总 catalog 并写入 ``staging/catalog.json``（pretty JSON）。
+    """汇总 catalog 并写入 ``staging/catalog.json``（pretty JSON）。
 
     ``CatalogError`` 直接向上抛：诊断已逐行 render，CLI 负责整份打印并返回 3。
     """
@@ -547,7 +547,7 @@ def _verify_catalog(out_dir: Path, manifest: dict) -> str:
             raise BuildError("manifest.json 缺少现有 catalog.json 的条目")
         # 旧代兼容：清单未声明 system 时代目录里没有 catalog，验收回落到既有
         # 入口名。这不是放水——没有 catalog 就没有「新入口」可言，启动侧也
-        # 仍走旧路径（P1-8b 才收敛）。
+        # 仍走旧路径。启动面收敛到 catalog 是另一批的事。
         logger.info("manifest.json 无 catalog 条目：按旧代处理，沿用 %s 验收", LEGACY_ENTRY_POINT)
         return LEGACY_ENTRY_POINT
     entry = manifest["catalog"]

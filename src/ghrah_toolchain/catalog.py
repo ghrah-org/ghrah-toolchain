@@ -6,7 +6,7 @@
 
 本模块只做**纯计算 + 读文件**：不碰安装域、不 spawn 进程。它把各组件
 ``component.toml`` 的 ``[providers]``/``[kernel]``、发行版的 ``system``/``identity``
-按契约 §5.10 的字段来源总表汇总成代内 ``catalog.json``。
+汇总成代内 ``catalog.json``。每个字段都有一个声明来源，不猜、不补默认。
 
 诊断分两层，口径不可混：
 
@@ -14,7 +14,7 @@
 - ``E-SYS-*``：验证「部署者把谁指派给了谁、身份集是否支撑得住、被选中的内核
   组件有没有声明入口」。
 
-两者都走契约 §4.2 的格式，按 §4.1 **一次报全**，不 fail-fast。
+两者用同一种诊断格式，并且**一次报全**，不 fail-fast。
 """
 
 from __future__ import annotations
@@ -33,10 +33,10 @@ from ghrah_toolchain.errors import ToolchainError
 from ghrah_toolchain.manifest import ManifestError, _validate, load_manifest
 
 CATALOG_SCHEMA = 1
-"""catalog 的契约版本（契约 §5.3：v0 固定为 1）。"""
+"""catalog 的格式版本。v0 固定为 1，不随字段增删进位。"""
 
 MAX_CONFIGURATION_BYTES = 65536
-"""单个服务 ``configuration`` 的字节上限（契约 §4.3.6 第 5 条、§5.8）。"""
+"""单个服务 ``configuration`` 的字节上限（按未展开的原始尺寸计）。"""
 
 _PROVIDER_DIAGNOSTIC_ORDER = {
     "E-PROV-ACTION-DUP": 1,
@@ -50,7 +50,7 @@ _PROVIDER_DIAGNOSTIC_ORDER = {
 
 @dataclass(frozen=True)
 class Diagnostic:
-    """一条构建期诊断（契约 §4.2 冻结格式）。
+    """一条构建期诊断。
 
     ``file`` 是相对工作区根的路径（如 ``ghrah-kernel/component.toml``），
     ``path`` 是字段路径（如 ``providers.namespace.restart``），顶层错误用空串。
@@ -81,7 +81,7 @@ class CatalogError(ToolchainError):
 
 
 def canonical_json(value: object) -> str:
-    """契约 §5.9 的规范化：键排序、数组保序、紧凑分隔符、不转义非 ASCII。"""
+    """规范化：键排序、数组保序、紧凑分隔符、不转义非 ASCII。"""
     return json.dumps(
         value,
         sort_keys=True,
@@ -97,7 +97,7 @@ def catalog_digest(catalog: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
 
 
-# ── schema 聚合（算法第 1–2 步）─────────────────────────────
+# ── schema 聚合（读清单 + 收集 schema 错误）──────────────────
 
 
 def _schema(kind: str) -> dict[str, Any]:
@@ -132,7 +132,7 @@ def _schema_diagnostics(
 ) -> list[Diagnostic]:
     """收集一份文档的**全部** schema 错误（不 fail-fast）。
 
-    契约 §4.1 明确要求「不得因为前面有 schema 错误就跳过后续检查」，
+    不得因为前面有 schema 错误就跳过后续检查，
     因此这里不用 ``manifest._validate`` 的取首错语义。
     """
     validator = Draft202012Validator(_schema(kind))
@@ -165,7 +165,7 @@ def _read_toml(path: Path, relative: str) -> tuple[dict[str, Any] | None, list[D
 def collect_schema_diagnostics(
     root: Path,
 ) -> tuple[dict[str, Any] | None, dict[str, dict], list[Diagnostic]]:
-    """算法第 1–2 步：读原始清单、聚合 workspace 与各组件 schema 错误。
+    """读原始清单、聚合 workspace 与各组件 schema 错误。
 
     返回 ``(workspace_data, components, diagnostics)``。``workspace_data`` 在
     ghrah.toml 无法解析时为 ``None``；``components`` 只含通过 schema 的组件。
@@ -220,7 +220,7 @@ def collect_schema_diagnostics(
     return data, components, diagnostics
 
 
-# ── 语义校验（算法第 5 步：六类 + §4.6）──────────────────────
+# ── 语义校验（六类 + 系统声明）────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -228,7 +228,7 @@ class ServiceView:
     """一个已启用服务在构建期的装配视图（尚未落成 catalog 条目）。
 
     服务集合 = ``distro.components`` 选中组件的 ``[providers]`` 全展开。
-    排序键严格按契约 §5.5：``(order 缺省 0, distro.components 索引, 组件内声明序)``
+    排序键：``(order 缺省 0, distro.components 索引, 组件内声明序)``
     ——只按 order 排会在多组件时得到不稳定顺序。
     """
 
@@ -274,7 +274,7 @@ def enabled_services(
     components: dict[str, dict],
     distro_name: str,
 ) -> list[ServiceView]:
-    """按 §5.5 的排序键列出该发行版启用的全部服务。"""
+    """按上述排序键列出该发行版启用的全部服务。"""
     distro = data.get("distro", {}).get(distro_name, {})
     selected = distro.get("components", [])
     if not isinstance(selected, list):
@@ -313,7 +313,7 @@ def _subject_ref(subject: dict[str, Any]) -> str:
 
 
 def _check_action_dup(data: dict[str, Any], services: list[ServiceView]) -> list[Diagnostic]:
-    """§4.3.1：``(contract, action)`` 全表唯一。跨组件、跨 provider、多 scheme 都算。"""
+    """``(contract, action)`` 全表唯一。跨组件、跨 provider、多 scheme 都算。"""
     diagnostics: list[Diagnostic] = []
     owners: dict[tuple[str, str], tuple[str, str]] = {}
     for service in services:
@@ -348,7 +348,7 @@ def _check_action_dup(data: dict[str, Any], services: list[ServiceView]) -> list
 def _check_dependency(
     data: dict[str, Any], services: list[ServiceView], skipped_components: set[str]
 ) -> list[Diagnostic]:
-    """§4.3.2：``after``/``requires_ready`` 目标须为已启用 id，且依赖图无环。"""
+    """``after``/``requires_ready`` 目标须为已启用 id，且依赖图无环。"""
     diagnostics: list[Diagnostic] = []
     known = {service.id for service in services}
     graph: dict[str, set[str]] = {}
@@ -409,7 +409,7 @@ def _check_dependency(
 def _check_namespace(
     data: dict[str, Any], services: list[ServiceView], distro_name: str, *, complete: bool
 ) -> list[Diagnostic]:
-    """§4.3.3：排序后首位必须是 namespace，且全表恰一个。"""
+    """排序后首位必须是 namespace，且全表恰一个。"""
     diagnostics: list[Diagnostic] = []
     namespaces = [service for service in services if service.kind == "namespace"]
     if len(namespaces) > 1 or (complete and not namespaces):
@@ -439,7 +439,7 @@ def _check_namespace(
 
 
 def _check_policy(data: dict[str, Any], services: list[ServiceView]) -> list[Diagnostic]:
-    """§4.3.4 的汇总层两条：namespace ⇒ never；close_action 成员属于本服务 schemes。"""
+    """汇总层两条：namespace ⇒ never；close_action 成员属于本服务 schemes。"""
     diagnostics: list[Diagnostic] = []
     for service in services:
         file = _component_relpath(data, service.component_id)
@@ -480,7 +480,7 @@ def _check_bindings(
     services: list[ServiceView],
     identity: dict[str, Any] | None,
 ) -> list[Diagnostic]:
-    """§4.3.5：bindings 的 scope/namespace 须在 identity 中，scheme 须是本服务的键。"""
+    """bindings 的 scope/namespace 须在 identity 中，scheme 须是本服务的键。"""
     diagnostics: list[Diagnostic] = []
     scope_records = (identity or {}).get("scopes")
     namespace_records = (identity or {}).get("namespaces")
@@ -588,7 +588,7 @@ def _check_configuration(
     components: dict[str, dict],
     services: list[ServiceView],
 ) -> list[Diagnostic]:
-    """§4.3.6：JSON 对象、无绝对路径、无保留参数、无保留键、未展开 ≤65536 字节。"""
+    """JSON 对象、无绝对路径、无保留参数、无保留键、未展开 ≤65536 字节。"""
     diagnostics: list[Diagnostic] = []
     for service in services:
         file = _component_relpath(data, service.component_id)
@@ -691,7 +691,7 @@ def _check_configuration(
     return diagnostics
 
 
-# ── §4.6 系统声明校验（部署者视角，独立前缀）─────────────────
+# ── 系统声明校验（部署者视角，独立前缀）─────────────────────
 
 
 def _check_system_identity(
@@ -702,7 +702,7 @@ def _check_system_identity(
     identity: dict[str, Any] | None,
     skipped_components: set[str],
 ) -> list[Diagnostic]:
-    """§4.6 第 1–4 条：绑定记录齐备、principal 可解析、主体种类合法。"""
+    """绑定记录齐备、principal 可解析、主体种类合法。"""
     diagnostics: list[Diagnostic] = []
     records = (system or {}).get("providers")
     if not isinstance(records, list):
@@ -795,7 +795,7 @@ def _check_system_scope(
     system: dict[str, Any] | None,
     identity: dict[str, Any] | None,
 ) -> list[Diagnostic]:
-    """§4.6 第 5 条：给出 resolution_scope 时，scope 已声明且对该 principal 开放。"""
+    """给出 resolution_scope 时，scope 已声明且对该 principal 开放。"""
     diagnostics: list[Diagnostic] = []
     prefix = f"distro.{distro_name}.system.providers"
     scope_records = (identity or {}).get("scopes")
@@ -848,7 +848,7 @@ def _check_kernel_entry(
     system: dict[str, Any] | None,
     selected: list[str],
 ) -> list[Diagnostic]:
-    """§4.6 第 7 条：system.kernel 选中组件须声明形状合法的 [kernel]。"""
+    """system.kernel 选中组件须声明形状合法的 [kernel]。"""
     diagnostics: list[Diagnostic] = []
     kernel_id = str((system or {}).get("kernel", ""))
     path = f"distro.{distro_name}.system.kernel"
@@ -889,7 +889,7 @@ def _check_host_entry(
     distro_name: str,
     system: dict[str, Any] | None,
 ) -> list[Diagnostic]:
-    """§4.6 第 8 条：host_instance 存在、host_entry 指向 process 条目、argv 非空无绝对路径。"""
+    """host_instance 存在、host_entry 指向 process 条目、argv 非空无绝对路径。"""
     diagnostics: list[Diagnostic] = []
     distro = data.get("distro", {}).get(distro_name, {})
     instances = distro.get("instances", {})
@@ -1022,15 +1022,15 @@ def _check_callers(identity: dict[str, Any] | None, distro_name: str) -> list[Di
     ]
 
 
-# ── 发行版解析与总入口（算法第 3–6 步）───────────────────────
+# ── 发行版解析与总入口 ──────────────────────────────────────
 
 
 def resolve_distro(
     data: dict[str, Any], distro: str | None, diagnostics: list[Diagnostic]
 ) -> str | None:
-    """算法第 3 步：``--distro`` 优先，缺省取 ``workspace.default_distro``；都没有则拒绝。
+    """``--distro`` 优先，缺省取 ``workspace.default_distro``；都没有则拒绝。
 
-    契约 §5.3 明确「不猜」：不猜默认发行版，也不在指定名不存在时回退。
+    不猜：不猜默认发行版，也不在指定名不存在时回退。
     """
     distros = data.get("distro", {})
     workspace = data.get("workspace", {})
@@ -1076,7 +1076,7 @@ def validate_semantics(
     distro_name: str,
     diagnostics: list[Diagnostic],
 ) -> None:
-    """算法第 4–5 步：系统声明可用性 + 六类 + §4.6，全部追加进 ``diagnostics``。
+    """系统声明可用性 + 六类 + 系统声明校验，全部追加进 ``diagnostics``。
 
     schema 未通过的组件已在收集阶段报错，这里只检查通过 schema 的组件。
     """
@@ -1122,7 +1122,7 @@ def validate_semantics(
     )
     diagnostics.extend(_check_configuration(root, data, components, services))
 
-    # §4.6（部署者指派成立）
+    # 系统声明（部署者指派成立）
     if isinstance(system, dict):
         diagnostics.extend(
             _check_system_identity(
@@ -1150,7 +1150,7 @@ def validate_semantics(
 def collect_diagnostics(
     root: Path, distro: str | None = None
 ) -> tuple[dict[str, Any] | None, str | None, list[Diagnostic]]:
-    """算法第 1–6 步：读清单 → schema 聚合 → 解析发行版 → 语义校验。
+    """读清单 → schema 聚合 → 解析发行版 → 语义校验。
 
     返回 ``(workspace_data, distro_name, diagnostics)``；调用方据 ``diagnostics``
     是否为空决定继续组装还是抛 :class:`CatalogError`。
@@ -1167,9 +1167,9 @@ def collect_diagnostics(
     return data, distro_name, sorted(diagnostics, key=Diagnostic.sort_key)
 
 
-# ── 组装（算法第 7 步：按 §5.10 逐行搬运）───────────────────
+# ── 组装（把校验过的声明逐行搬运成 catalog）─────────────────
 
-#: 可选字段：声明了才出现（契约 §5.5 的稀疏规范化）。
+#: 可选字段：声明了才出现（稀疏规范化）。
 _SPARSE_FIELDS = (
     "order",
     "after",
@@ -1201,7 +1201,7 @@ def _build_host(
     system: dict[str, Any],
     distro_name: str,
 ) -> dict[str, Any]:
-    """§5.10：host 四字段全部来自声明，不猜、不补默认。"""
+    """host 四字段全部来自声明，不猜、不补默认。"""
     instance_name = str(system.get("host_instance", ""))
     instance = data["distro"][distro_name]["instances"][instance_name]
     component_id = str(instance.get("component", ""))
@@ -1217,7 +1217,7 @@ def _build_host(
 
 
 def _build_kernel(components: dict[str, dict], system: dict[str, Any]) -> dict[str, Any]:
-    """§5.10：kernel.module/entry 来自该组件的 [kernel]，不是工具链常量。"""
+    """kernel.module/entry 来自该组件的 [kernel]，不是工具链常量。"""
     component_id = str(system.get("kernel", ""))
     declaration = components[component_id]["kernel"]
     return {
@@ -1280,14 +1280,14 @@ def _build_service(
     entry["binding"] = _caller_binding(
         str(record.get("principal", "")),
         record.get("resolution_scope"),
-        diagnostics=False,  # §5.5：服务不是观察者
+        diagnostics=False,  # 服务不是观察者
     )
     entry["configuration"] = _build_configuration(root, data, service)
     return entry
 
 
 def _build_callers(identity: dict[str, Any]) -> dict[str, Any]:
-    """契约 §3.4：首个 user 主体 + 首个 scope；诊断许可只给 control。"""
+    """首个 user 主体 + 首个 scope；诊断许可只给 control。"""
     subjects = [s for s in identity.get("subjects", []) if isinstance(s, dict)]
     admin = next(subject for subject in subjects if subject.get("kind") == "user")
     principal = _subject_ref(admin)
@@ -1301,7 +1301,7 @@ def _build_callers(identity: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_catalog(root: Path, *, distro: str | None = None) -> dict[str, Any]:
-    """把工作区清单汇总成代内 catalog（契约 §5.2 的形状）。
+    """把工作区清单汇总成代内 catalog。
 
     诊断非空即抛 :class:`CatalogError`，**一条不落**；全部无诊断才组装。
     组装完成后用 ``catalog-v1.json`` 自校验，避免产出"看着对但形状不合契约"
