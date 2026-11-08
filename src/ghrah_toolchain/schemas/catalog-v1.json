@@ -1,0 +1,344 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "integer",
+      "const": 1
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "workspace": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "distro": {
+      "type": "string",
+      "minLength": 1
+    },
+    "host": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "string",
+          "minLength": 1
+        },
+        "component": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entry": {
+          "type": "string",
+          "pattern": "^[^/]+/[^/]+$"
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "instance",
+        "component",
+        "entry",
+        "command"
+      ],
+      "additionalProperties": false
+    },
+    "kernel": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "type": "string",
+          "minLength": 1
+        },
+        "module": {
+          "type": "string",
+          "pattern": "^[A-Za-z_]\\w*(\\.[A-Za-z_]\\w*)*$"
+        },
+        "entry": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+        }
+      },
+      "required": [
+        "component",
+        "module",
+        "entry"
+      ],
+      "additionalProperties": false
+    },
+    "services": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*:[a-z][a-z0-9-]*$"
+          },
+          "component": {
+            "type": "string",
+            "minLength": 1
+          },
+          "module": {
+            "type": "string",
+            "minLength": 1
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "after": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "requires_ready": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "restart": {
+            "enum": [
+              "never",
+              "on_failure",
+              "always"
+            ]
+          },
+          "max_restarts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "window_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 60
+          },
+          "drain_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 500
+          },
+          "close_timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000
+          },
+          "close_action": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "ready": {
+            "$ref": "#/$defs/probe"
+          },
+          "health": {
+            "$ref": "#/$defs/probe"
+          },
+          "schemes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]*$"
+                },
+                "contract": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "actions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "name",
+                "contract",
+                "actions"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "bindings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "pattern": "^/"
+                },
+                "scheme": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]*$"
+                },
+                "scope": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "namespace": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "path",
+                "scheme",
+                "scope",
+                "namespace"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "binding": {
+            "$ref": "#/$defs/callerBinding"
+          },
+          "configuration": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "component",
+          "module",
+          "provider",
+          "kind",
+          "schemes",
+          "bindings",
+          "binding",
+          "configuration"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "identity": {
+      "$ref": "https://schemas.ghrah.invalid/workspace-v1.json#identity"
+    },
+    "callers": {
+      "type": "object",
+      "properties": {
+        "control": {
+          "$ref": "#/$defs/callerBinding"
+        },
+        "observer": {
+          "$ref": "#/$defs/callerBinding"
+        },
+        "peer": {
+          "$ref": "#/$defs/callerBinding"
+        }
+      },
+      "required": [
+        "control",
+        "observer",
+        "peer"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "digest",
+    "workspace",
+    "distro",
+    "host",
+    "kernel",
+    "services",
+    "identity",
+    "callers"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "probe": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "handshake",
+            "protocol"
+          ]
+        },
+        "contract": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "type",
+        "contract"
+      ],
+      "additionalProperties": false
+    },
+    "callerBinding": {
+      "type": "object",
+      "properties": {
+        "principal": {
+          "type": "string",
+          "pattern": "^\\[\".+\",\".+\"\\]$"
+        },
+        "resolution_scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "diagnostics": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "principal",
+        "resolution_scope",
+        "diagnostics"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

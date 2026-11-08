@@ -247,6 +247,7 @@
               "additionalProperties": false
             },
             "identity": {
+              "$anchor": "identity",
               "type": "object",
               "properties": {
                 "grant_lifetime": {

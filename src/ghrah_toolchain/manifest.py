@@ -15,6 +15,8 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
+from referencing import Registry, Resource
+from referencing.jsonschema import DRAFT202012
 
 from ghrah_toolchain.errors import ToolchainError
 
@@ -49,11 +51,36 @@ def _within(root: Path, value: str, *, directory: bool = False) -> Path:
     return path
 
 
+WORKSPACE_SCHEMA_URI = "https://schemas.ghrah.invalid/workspace-v1.json"
+"""workspace schema 的离线标识。
+
+仅作本地寻址用：catalog-v1.json 以 ``$ref: <URI>#identity`` 复用 workspace 的
+身份约束，registry 只从打包资源取文件，不设网络取回函数。用固定 URI 而不是
+JSON Pointer，是因为 identity 内联在 ``distro`` 的 ``patternProperties`` 之下，
+指针里会带上发行版名的正则键——那份键一旦改动，引用就会静默失效。
+"""
+
+
+def schema_registry() -> Registry:
+    """把 workspace schema 注册为可离线解析的资源，供跨文件 ``$ref`` 使用。"""
+    resource = files("ghrah_toolchain").joinpath("schemas", "workspace-v1.json")
+    data = json.loads(resource.read_text(encoding="utf-8"))
+    return Registry().with_resource(
+        WORKSPACE_SCHEMA_URI,
+        Resource.from_contents(data, default_specification=DRAFT202012),
+    )
+
+
 def _validate(data: dict[str, Any], kind: str, path: Path) -> None:
     resource = files("ghrah_toolchain").joinpath("schemas", f"{kind}-v1.json")
     schema = json.loads(resource.read_text(encoding="utf-8"))
-    # 所有引用均位于打包 schema 的 $defs 中，不访问网络。
-    errors = sorted(Draft202012Validator(schema).iter_errors(data), key=lambda e: str(e.path))
+    # 同包内引用（catalog → workspace#identity）经 registry 离线解析，不访问网络。
+    validator = (
+        Draft202012Validator(schema, registry=schema_registry())
+        if kind == "catalog"
+        else Draft202012Validator(schema)
+    )
+    errors = sorted(validator.iter_errors(data), key=lambda e: str(e.path))
     if errors:
         error = errors[0]
         field = ".".join(str(part) for part in error.absolute_path) or "<root>"

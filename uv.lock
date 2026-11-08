@@ -28,6 +28,7 @@ dependencies = [
     { name = "jsonschema" },
     { name = "packaging" },
     { name = "psutil" },
+    { name = "referencing" },
     { name = "tomlkit" },
 ]
 
@@ -43,6 +44,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.26" },
     { name = "packaging", specifier = ">=26.3" },
     { name = "psutil", specifier = ">=7.2" },
+    { name = "referencing", specifier = ">=0.36" },
     { name = "tomlkit", specifier = ">=0.15" },
 ]
 

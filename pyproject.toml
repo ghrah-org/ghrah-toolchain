@@ -17,6 +17,7 @@ dependencies = [
     "jsonschema>=4.26",
     "packaging>=26.3",
     "psutil>=7.2",
+    "referencing>=0.36",
     "tomlkit>=0.15",
 ]
 
