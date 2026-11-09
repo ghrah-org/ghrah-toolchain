@@ -4,7 +4,8 @@
 
 """boot 编排：解析引导目标 → 组装 OS/前端（代内入口 + 静态 serve）→ 监督与收束。
 
-- OS 入口经 ``current`` 进代（``current/env/.venv/bin/ghrah-subject-server``）；
+- OS 入口经 ``current`` 进代（``current/env/.venv/<entry>``）：入口名读代内
+  ``catalog.host.command[0]``，无 catalog 的旧代回落 ``ghrah-subject-server``；
   OS ``cwd`` 为 ``current/`` 稳定路径；数据面五项 + 端口全量 env 注入，
   指向发行版数据盘（版本无关，不落任何版本的默认位）。
 - webui 默认静态 serve 基座产物 dist（代目标：``versions/<base>/observer-web/dist``，
@@ -43,7 +44,7 @@ from ghrah_toolchain.layout import (
     resolve_data_root,
 )
 from ghrah_toolchain.lifecycle import DEFAULT_HOST, BootStack, StackConfig, port_in_use
-from ghrah_toolchain.materialize import read_generation
+from ghrah_toolchain.materialize import _venv_entry, host_entry_name, read_generation
 from ghrah_toolchain.runtime_ref import (
     _pid_alive,
     acquire_distro_lock,
@@ -136,30 +137,29 @@ class BootTarget:
         return f"{self.distro}/{self.version}"
 
 
-def os_server_entry(venv: Path) -> Path:
-    """OS 入口路径（``ghrah-subject-server``；不做存在性校验）。"""
-    if os.name == "nt":
-        return venv / "Scripts" / "ghrah-subject-server.exe"
-    return venv / "bin" / "ghrah-subject-server"
+def os_server_entry(generation_root: Path) -> Path:
+    """代内宿主入口路径（入口名来自代内 catalog；无 catalog 的旧代回落兼容入口）。"""
+    return _venv_entry(generation_root / "env" / ".venv", host_entry_name(generation_root))
 
 
-def os_server_command(venv: Path) -> list[str]:
-    """OS 进程命令：给定 venv 的 ``ghrah-subject-server`` 入口（纯 venv→命令助手）。"""
-    server = os_server_entry(venv)
+def os_server_command(generation_root: Path) -> list[str]:
+    """OS 进程命令：代内宿主入口（入口名读 catalog；不做启动冒烟）。"""
+    server = os_server_entry(generation_root)
     if not server.is_file():
         raise ToolchainError(f"后端启动程序缺失: {server}（运行环境尚未准备好，请先完成安装）")
     return [str(server)]
 
 
 def resolve_os_server(layout: DistroLayout) -> list[str]:
-    """OS 入口：``current/env/.venv``（代内 per-gen env）。
+    """OS 入口：代内 catalog 的宿主入口（``current/env/.venv/<entry>``）。
 
-    发行级 ``env/`` 兜底已退役（worktree 形态不再支持）；
-    代内 env 缺失即报错。
+    入口名来自代内 catalog（无 catalog 的旧代回落兼容入口），不再硬编码入口名；
+    发行级 ``env/`` 兜底已退役（worktree 形态不再支持），代内 env 缺失即报错。
     """
     gen_venv = layout.current / "env" / ".venv"
-    if os_server_entry(gen_venv).is_file():
-        return os_server_command(gen_venv)
+    entry = os_server_entry(layout.current)
+    if entry.is_file():
+        return [str(entry)]
     raise ToolchainError(
         f"后端启动程序缺失: {gen_venv}（当前版本的运行环境尚未准备好，请先完成安装）"
     )

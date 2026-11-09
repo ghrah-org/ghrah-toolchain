@@ -46,6 +46,8 @@ GENERATION_SCHEMA_VERSION = 1
 FINGERPRINT_NAME = ".deps-fingerprint"
 GENERATION_TOML = "GENERATION.toml"
 CATALOG_FILE = "catalog.json"
+# 无代内 catalog 的旧代沿用既有宿主入口；新代入口来自 catalog.host.command。
+LEGACY_ENTRY_POINT = "ghrah-subject-server"
 
 _CACHE_SUBDIR_UV = "cache/uv"
 _CACHE_SUBDIR_PNPM = "cache/pnpm-store"
@@ -250,6 +252,32 @@ def generation_complete(gen_dir: Path) -> bool:
         return _catalog_file_sha256(catalog) == info.catalog_sha256
     except MaterializeError:
         return False
+
+
+def host_entry_name(generation_root: Path) -> str:
+    """代内宿主入口名：新代读 ``catalog.host.command[0]``，旧代回落兼容入口。
+
+    只做「取一个入口名」的判定，不重复构建期的 schema/digest 校验（构建期已校验）；
+    但 catalog 存在却取不到合法 ``host.command`` 时 fail-closed，不静默回落——
+    否则「有声明时不得回退旧入口」的口径会被悄悄放宽。
+    """
+    generation_root = Path(generation_root)
+    catalog_path = generation_root / CATALOG_FILE
+    if not (catalog_path.exists() or catalog_path.is_symlink()):
+        return LEGACY_ENTRY_POINT
+    try:
+        data = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise MaterializeError(f"代内目录无法解析: {catalog_path}（{exc}）") from exc
+    host = data.get("host") if isinstance(data, dict) else None
+    command = host.get("command") if isinstance(host, dict) else None
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(item, str) and item for item in command)
+    ):
+        raise MaterializeError(f"代内目录缺少有效的 host.command: {catalog_path}")
+    return command[0]
 
 
 def _venv_python(venv: Path) -> Path:

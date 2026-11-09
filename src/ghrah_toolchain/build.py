@@ -36,7 +36,13 @@ from pathlib import Path
 
 from ghrah_toolchain import __version__
 from ghrah_toolchain.errors import BuildError
-from ghrah_toolchain.materialize import CATALOG_FILE, RUNTIME_PYTHON, pnpm_command, runtime_python
+from ghrah_toolchain.materialize import (
+    CATALOG_FILE,
+    LEGACY_ENTRY_POINT,
+    RUNTIME_PYTHON,
+    pnpm_command,
+    runtime_python,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +86,6 @@ MANIFEST_SCHEMA_VERSION = 1
 VERIFY_IMPORTS = (
     "import ghrah.core, ghrah.protocol, ghrah.subject, ghrah.plugin, ghrah.taskstore, ghrah_kernel"
 )
-# 无代内目录的旧代沿用既有入口，新代从 catalog.host.command 读取入口。
-LEGACY_ENTRY_POINT = "ghrah-subject-server"
 
 
 @dataclass(frozen=True)

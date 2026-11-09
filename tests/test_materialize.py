@@ -25,6 +25,7 @@ from ghrah_toolchain.materialize import (
     CATALOG_FILE,
     FINGERPRINT_NAME,
     GENERATION_TOML,
+    LEGACY_ENTRY_POINT,
     GenerationSpec,
     PluginRef,
     _install_python_env,
@@ -32,6 +33,7 @@ from ghrah_toolchain.materialize import (
     generation_dir,
     generation_fingerprint,
     generation_id,
+    host_entry_name,
     materialize_generation,
     pnpm_command,
     read_generation,
@@ -426,3 +428,29 @@ def test_m5b_generation_dir_pure() -> None:
 
 def test_m5c_pnpm_command_platform() -> None:
     assert pnpm_command() == (["cmd", "/c", "pnpm"] if os.name == "nt" else ["pnpm"])
+
+
+# ── M6 宿主入口名解析（catalog → 入口；无 catalog 回落） ─────
+
+
+def test_host_entry_name_prefers_catalog(tmp_path: Path) -> None:
+    (tmp_path / CATALOG_FILE).write_text(
+        '{"host": {"command": ["ghrah-subject-host"]}}', encoding="utf-8"
+    )
+    assert host_entry_name(tmp_path) == "ghrah-subject-host"
+
+
+def test_host_entry_name_falls_back_without_catalog(tmp_path: Path) -> None:
+    assert not (tmp_path / CATALOG_FILE).exists()
+    assert host_entry_name(tmp_path) == LEGACY_ENTRY_POINT
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["not json", "{}", '{"host": {}}', '{"host": {"command": []}}', '{"host": {"command": [1]}}'],
+)
+def test_host_entry_name_rejects_bad_catalog(tmp_path: Path, payload: str) -> None:
+    """catalog 存在却取不到合法 host.command → fail-closed，不回落。"""
+    (tmp_path / CATALOG_FILE).write_text(payload, encoding="utf-8")
+    with pytest.raises(MaterializeError, match="代内目录"):
+        host_entry_name(tmp_path)

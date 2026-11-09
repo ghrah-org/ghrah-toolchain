@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ghrah_toolchain import snapshot
-from ghrah_toolchain.build import build_artifacts, read_source_commit
+from ghrah_toolchain.build import VERIFY_IMPORTS, build_artifacts, read_source_commit
 from ghrah_toolchain.errors import GateError, RuntimeRefError, ToolchainError
 from ghrah_toolchain.layout import (
     BootToml,
@@ -56,10 +56,13 @@ from ghrah_toolchain.layout import (
 from ghrah_toolchain.lifecycle import DEFAULT_HOST, port_in_use
 from ghrah_toolchain.materialize import (
     GenerationSpec,
+    _venv_entry,
+    _venv_python,
     base_catalog_sha256,
     generation_complete,
     generation_dir,
     generation_fingerprint,
+    host_entry_name,
     materialize_generation,
     read_generation,
 )
@@ -757,33 +760,25 @@ class RuntimeRefManager:
         return "passed"
 
     def _gate_generation(self, gen_dir: Path) -> None:
-        """代 env 冒烟：import 五包 + ``ghrah-subject-server`` 入口存在。
+        """代 env 冒烟：import 六包 + 代内 catalog 声明的宿主入口存在。
 
         入口为存在性校验（真实入口 main() 不解析参数，``--help`` 会直接启动
         服务器占端口；启动冒烟属 boot 域验证）。
         """
         venv = gen_dir / "env" / ".venv"
-        py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        py = _venv_python(venv)
         if not py.is_file():
             raise GateError(f"运行环境中缺少 Python 解释器: {py}（安装不完整，请重新安装）")
-        cp = self._run(
-            [
-                str(py),
-                "-c",
-                "import ghrah.core, ghrah.protocol, ghrah.subject, ghrah.plugin, ghrah.taskstore",
-            ],
-            check=False,
-        )
+        cp = self._run([str(py), "-c", VERIFY_IMPORTS], check=False)
         if cp.returncode != 0:
             raise GateError(
                 "运行环境中的 Python 包无法导入: "
                 f"{cp.stderr.strip()[-800:] or cp.stdout.strip()[-800:]}"
             )
-        sub = "Scripts" if os.name == "nt" else "bin"
-        suffix = ".exe" if os.name == "nt" else ""
-        server = venv / sub / f"ghrah-subject-server{suffix}"
+        entry = host_entry_name(gen_dir)
+        server = _venv_entry(venv, entry)
         if not server.is_file():
-            raise GateError(f"运行环境中缺少后端启动程序 ghrah-subject-server: {server}")
+            raise GateError(f"运行环境中缺少后端启动程序 {entry}: {server}")
 
     # ── 快照（委托 snapshot 模块） ──
 

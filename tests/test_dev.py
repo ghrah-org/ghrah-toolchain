@@ -192,3 +192,22 @@ actions = ["inspect"]
     assert not (ctx.gen / CATALOG_FILE).exists()
     assert not (ctx.artifacts / CATALOG_FILE).exists()
     assert calls == ["full", "install", "incremental", "upgrade"]
+
+
+def test_smoke_resolves_entry_from_generation_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """冒烟把代根（不是 venv）交给入口解析：入口名要读代内 catalog。"""
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str]) -> None:
+        captured["cmd"] = command
+
+    def fake_server_command(gen: Path) -> list[str]:
+        captured["gen"] = gen
+        return []
+
+    monkeypatch.setattr(dev, "_run", fake_run)
+    monkeypatch.setattr(dev, "os_server_command", fake_server_command)
+    dev._smoke(tmp_path)
+    assert captured["gen"] == tmp_path

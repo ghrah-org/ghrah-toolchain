@@ -525,6 +525,51 @@ def test_gate_full_and_data_rejected(home: Path, repo: Path) -> None:
         mgr._gate(Path("/tmp"), "weird")
 
 
+def _fake_gen_with_catalog(home: Path, catalog: str, entry: str) -> Path:
+    """造一个「有 catalog + 假解释器 + 指定入口」的代目录（只测入口解析面）。"""
+    gen = home / "generic" / "generations" / "2026.09"
+    sub = "Scripts" if os.name == "nt" else "bin"
+    suffix = ".exe" if os.name == "nt" else ""
+    (gen / "env" / ".venv" / sub).mkdir(parents=True)
+    (gen / "env" / ".venv" / sub / f"python{suffix}").write_text("", encoding="utf-8")
+    (gen / "catalog.json").write_text(catalog, encoding="utf-8")
+    (gen / "env" / ".venv" / sub / f"{entry}{suffix}").write_text("", encoding="utf-8")
+    return gen
+
+
+def _stub_run(mgr: RuntimeRefManager, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        mgr,
+        "_run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+
+def test_gate_generation_reads_catalog_entry(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """basic 门禁的入口名来自代内 catalog，而不是硬编码旧入口。"""
+    mgr = _mgr(home, repo)
+    gen = _fake_gen_with_catalog(
+        home, '{"host": {"command": ["ghrah-subject-host"]}}', "ghrah-subject-host"
+    )
+    _stub_run(mgr, monkeypatch)
+    mgr._gate_generation(gen)
+
+
+def test_gate_generation_rejects_bad_catalog(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """catalog 存在但缺 host.command → 门禁失败，不静默回落旧入口。"""
+    mgr = _mgr(home, repo)
+    gen = _fake_gen_with_catalog(home, "{}", "ghrah-subject-host")
+    _stub_run(mgr, monkeypatch)
+    with pytest.raises(GateError, match="host.command"):
+        mgr._gate(gen, "basic")
+
+
 # ── 身份（BOOTSTRAP-only，无 git 回退） ────────────────
 
 

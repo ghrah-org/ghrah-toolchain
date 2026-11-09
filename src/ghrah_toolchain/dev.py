@@ -409,10 +409,10 @@ def _upgrade_dev(
 
 
 def _smoke(gen: Path) -> None:
-    """轻量冒烟：dev venv 内 import 五包 + 入口存在（不出全量 verify_artifacts）。"""
+    """轻量冒烟：dev venv 内 import 六包 + 入口存在（不出全量 verify_artifacts）。"""
     py = _venv_python(gen / "env" / ".venv")
     _run([str(py), "-c", VERIFY_IMPORTS])
-    os_server_command(gen / "env" / ".venv")  # 入口存在性校验（缺失即抛）
+    os_server_command(gen)  # 入口存在性校验（缺失即抛；入口名读代内 catalog）
 
 
 # ── 进程生命周期（dev 会话 / 发布态会话） ─────────────────────
@@ -580,7 +580,7 @@ async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
     webui_root = _dev_webui_root(ctx)
     stack = BootStack(
         config,
-        os_command=os_server_command(ctx.gen / "env" / ".venv"),
+        os_command=os_server_command(ctx.gen),
         os_cwd=ctx.gen,
         os_env=os_env,
         webui_static_root=webui_root,

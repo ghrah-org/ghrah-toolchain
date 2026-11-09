@@ -183,9 +183,8 @@ def test_resolve_boot_target_missing_current(tmp_path: Path) -> None:
 def test_os_server_command_missing_binary(tmp_path: Path) -> None:
     from ghrah_toolchain.errors import ToolchainError
 
-    layout = DistroLayout(root=tmp_path)
     with pytest.raises(ToolchainError, match="启动程序缺失"):
-        os_server_command(layout.root / "env" / ".venv")
+        os_server_command(tmp_path)
 
 
 # ── run_boot 端到端（真实子进程，mock OS 脚本） ───────────────
@@ -567,20 +566,64 @@ def test_resolve_boot_target_ref_last_good_toml_generation(tmp_path: Path) -> No
 # ── OS 入口经 current 进代 ───────────────────────────────────
 
 
-def _server_entry(venv: Path) -> Path:
+def _server_entry(gen: Path) -> Path:
     from ghrah_toolchain.boot import os_server_entry
 
-    return os_server_entry(venv)
+    return os_server_entry(gen)
+
+
+def _venv_bin(gen: Path, name: str) -> Path:
+    sub = "Scripts" if os.name == "nt" else "bin"
+    suffix = ".exe" if os.name == "nt" else ""
+    return gen / "env" / ".venv" / sub / f"{name}{suffix}"
 
 
 def test_resolve_os_server_prefers_current_gen_env(tmp_path: Path) -> None:
-    """代目标 OS 入口 = current/env/.venv。"""
+    """旧代（无 catalog）OS 入口 = current/env/.venv 的兼容入口。"""
     from ghrah_toolchain.boot import resolve_os_server
 
     layout = _make_gen(tmp_path)
-    gen_entry = _server_entry(layout.current / "env" / ".venv")
+    gen_entry = _server_entry(layout.current)
     cmd = resolve_os_server(layout)
     assert cmd == [str(gen_entry)]
+    assert "ghrah-subject-server" in gen_entry.name
+
+
+def test_resolve_os_server_reads_catalog_entry(tmp_path: Path) -> None:
+    """新代（有 catalog）入口名来自 catalog.host.command[0]。"""
+    from ghrah_toolchain.boot import resolve_os_server
+
+    layout = _make_gen(tmp_path)
+    (layout.current / "catalog.json").write_text(
+        '{"host": {"command": ["ghrah-subject-host"]}}', encoding="utf-8"
+    )
+    custom = _venv_bin(layout.current, "ghrah-subject-host")
+    custom.write_text("", encoding="utf-8")
+    assert resolve_os_server(layout) == [str(custom)]
+
+
+def test_resolve_os_server_rejects_bad_catalog(tmp_path: Path) -> None:
+    """catalog 存在但缺 host.command → fail-closed，不静默回落旧入口。"""
+    from ghrah_toolchain.boot import resolve_os_server
+    from ghrah_toolchain.errors import ToolchainError
+
+    layout = _make_gen(tmp_path)
+    (layout.current / "catalog.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ToolchainError, match="host.command"):
+        resolve_os_server(layout)
+
+
+def test_resolve_os_server_catalog_entry_missing_binary_raises(tmp_path: Path) -> None:
+    """catalog 指向的入口不存在 → 报错，不回退到旧入口。"""
+    from ghrah_toolchain.boot import resolve_os_server
+    from ghrah_toolchain.errors import ToolchainError
+
+    layout = _make_gen(tmp_path)
+    (layout.current / "catalog.json").write_text(
+        '{"host": {"command": ["ghrah-subject-host"]}}', encoding="utf-8"
+    )
+    with pytest.raises(ToolchainError, match="当前版本的运行环境尚未准备好"):
+        resolve_os_server(layout)
 
 
 def test_resolve_os_server_missing_raises(tmp_path: Path) -> None:
@@ -589,7 +632,7 @@ def test_resolve_os_server_missing_raises(tmp_path: Path) -> None:
     from ghrah_toolchain.errors import ToolchainError
 
     layout = _make_gen(tmp_path)
-    _server_entry(layout.current / "env" / ".venv").unlink()
+    _server_entry(layout.current).unlink()
     with pytest.raises(ToolchainError, match="当前版本的运行环境尚未准备好"):
         resolve_os_server(layout)
 
