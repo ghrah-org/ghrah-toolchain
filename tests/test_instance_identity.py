@@ -47,7 +47,7 @@ def _port() -> int:
 
 def _install_stub_subject(generation: Path) -> None:
     """放一个「起得来但不监听端口」的后端入口：只为让监督进程走到 ``.boot.pid``。"""
-    entry = os_server_entry(generation / "env" / ".venv")
+    entry = os_server_entry(generation)
     entry.parent.mkdir(parents=True, exist_ok=True)
     if sys.platform == "win32":
         # 入口必须是真实 PE：拷一份解释器，无参启动且 stdin 已 EOF → 立即退出。
