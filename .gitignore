@@ -5,6 +5,10 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 
+# pytest 临时目录（TEMP 不可写时的本地兜底）
+.pytest-tmp/
+pytest-of-*/
+
 *.egg-info/
 build/
 dist/
