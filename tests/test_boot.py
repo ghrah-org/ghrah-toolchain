@@ -278,20 +278,34 @@ async def test_run_boot_env_injection_and_supervision(
     assert os_env["GHRAH_SUBJECT_WORKSPACE_ROOT"] == str(data_root / "workspace")
     assert os_env["GHRAH_SUBJECT_SERVER_HOST"] == "127.0.0.1"
     assert os_env["GHRAH_SUBJECT_SERVER_PORT"] == str(port)
+    assert os_env["GHRAH_DATA_ROOT"] == str(data_root)
+    assert os_env["GHRAH_DISTRO_ROOT"] == str(layout.root)
+    assert os_env["GHRAH_GENERATION_ID"] == target.version
     assert os_env["GHRAH_SUBJECT_ABILITY_SOURCE"] == "builtin"
     # 数据盘目录已物化
     for sub in ("manifests", "projects", "workspace"):
         assert (data_root / sub).is_dir()
 
 
-async def test_distro_environment_cannot_override_managed_paths(distro_with_mock_os) -> None:
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "GHRAH_SUBJECT_DB_PATH",
+        "GHRAH_DATA_ROOT",
+        "GHRAH_DISTRO_ROOT",
+        "GHRAH_GENERATION_ID",
+    ],
+)
+async def test_distro_environment_cannot_override_managed_paths(
+    distro_with_mock_os, variable
+) -> None:
     from ghrah_toolchain.errors import ToolchainError
 
     root, layout = distro_with_mock_os
     with (layout.root / "distro.toml").open("a") as configuration:
-        configuration.write('\n[runtime.env]\nGHRAH_SUBJECT_DB_PATH = "/tmp/another.db"\n')
-    target = resolve_boot_target("generic", None, root=root)
+        configuration.write(f'\n[runtime.env]\n{variable} = "/tmp/another.db"\n')
     with pytest.raises(ToolchainError, match="runtime.env"):
+        target = resolve_boot_target("generic", None, root=root)
         await run_boot(target, no_webui=True)
 
 
@@ -707,6 +721,9 @@ async def test_run_boot_gen_form_env_injection_and_cwd(
     assert os_env["GHRAH_SUBJECT_SERVER_HOST"] == "127.0.0.1"
     assert os_env["GHRAH_SUBJECT_SERVER_PORT"] == str(port)
     assert os_env["BOOT_TEST_CWD"] == str((root / "generic" / "generations" / "2026.09").resolve())
+    assert os_env["GHRAH_DATA_ROOT"] == str(data_root)
+    assert os_env["GHRAH_DISTRO_ROOT"] == str(layout.root)
+    assert os_env["GHRAH_GENERATION_ID"] == target.version
 
 
 # ── webui 静态 serve / --webui-dev ───────────────────────────

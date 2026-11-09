@@ -25,6 +25,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -123,7 +124,7 @@ def port_in_use(host: str, port: int) -> bool:
     return False
 
 
-def terminate_process(proc: subprocess.Popen[bytes]) -> None:
+def terminate_process(proc: subprocess.Popen[bytes], *, graceful: bool = False) -> None:
     """终止子进程及其整个进程组（POSIX）/ 进程树（Windows taskkill /T）。
 
     安全护栏（防误伤无关进程组）：
@@ -136,6 +137,13 @@ def terminate_process(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is not None:
         return
     if os.name == "nt":
+        if graceful:
+            try:
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+                proc.wait(timeout=20)
+                return
+            except OSError, subprocess.TimeoutExpired:
+                logger.warning("后端未响应优雅停止，回退到进程树强制终止")
         # terminate() 只杀直接子进程（cmd.exe），杀不到 pnpm 的 node 子进程树；
         # taskkill /T 按进程树终止。
         try:
@@ -238,6 +246,7 @@ class BootStack:
         self._os_command = os_command
         self._os_cwd = os_cwd
         self._os_env = os_env
+        self._os_control = None
         self._webui_dir = webui_dir
         self._webui_static_root = webui_static_root
         self._webui_ws_url = webui_ws_url
@@ -289,8 +298,17 @@ class BootStack:
             await self._wait_webui_port_released()
         self._cleanup_webui_env_file()
         if self._os_process is not None:
-            terminate_process(self._os_process)
+            if self._os_control is not None and self._os_process.poll() is None:
+                Path(self._os_control.name, "stop").touch()
+                try:
+                    await asyncio.to_thread(self._os_process.wait, timeout=20)
+                except subprocess.TimeoutExpired:
+                    logger.warning("宿主未响应停止请求，回退到进程终止")
+            terminate_process(self._os_process, graceful=True)
             self._os_process = None
+        if self._os_control is not None:
+            self._os_control.cleanup()
+            self._os_control = None
         self._started = False
 
     # ── OS 子进程（out-of-process） ──
@@ -307,13 +325,21 @@ class BootStack:
         env = os.environ.copy()
         if self._os_env:
             env.update(self._os_env)
+        if any(Path(arg).stem == "ghrah-subject-host" for arg in self._os_command):
+            self._os_control = tempfile.TemporaryDirectory(prefix="ghrah-host-control-")
+            env["GHRAH_HOST_STOP_FILE"] = str(Path(self._os_control.name) / "stop")
+        process_options = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            if os.name == "nt"
+            else {"start_new_session": True}
+        )
         self._os_process = subprocess.Popen(
             self._os_command,
             cwd=str(self._os_cwd) if self._os_cwd is not None else None,
             env=env,
             stdout=None,
             stderr=None,
-            start_new_session=True,
+            **process_options,
         )
         logger.info(
             "正在启动后端（进程编号: %d；端口: %d）",

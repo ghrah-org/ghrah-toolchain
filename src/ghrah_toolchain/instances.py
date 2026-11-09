@@ -279,7 +279,36 @@ def serve_instance(name: str, token: str, *, no_webui: bool = False) -> int:
 
     try:
         target = resolve_boot_target(name, record["generation"])
-        code = asyncio.run(run_boot(target, no_webui=no_webui, no_browser=True, on_ready=ready))
+
+        async def supervise() -> int:
+            stop = asyncio.Event()
+
+            async def requested() -> None:
+                while True:
+                    current = _read(root)
+                    if (
+                        current is None
+                        or current["token"] != token
+                        or current["state"] == "stopping"
+                    ):
+                        stop.set()
+                        return
+                    await asyncio.sleep(0.1)
+
+            watcher = asyncio.create_task(requested())
+            try:
+                return await run_boot(
+                    target,
+                    no_webui=no_webui,
+                    no_browser=True,
+                    on_ready=ready,
+                    stop_event=stop,
+                )
+            finally:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+
+        code = asyncio.run(supervise())
     except Exception as exc:
         logging.exception("[%s] 启动或运行失败", name)
         _transition(root, token, "failed", str(exc))
@@ -324,11 +353,7 @@ def stop_instance(name: str, *, timeout: float = 15.0) -> int:
         record["state"] = "stopping"
         _write(root, record)
         try:
-            if os.name == "nt":
-                from ghrah_toolchain.boot import _taskkill
-
-                _taskkill(process.pid, force=True)
-            else:
+            if os.name != "nt":
                 process.send_signal(signal.SIGTERM)
         except psutil.NoSuchProcess:
             return 0

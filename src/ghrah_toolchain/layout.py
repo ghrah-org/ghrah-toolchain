@@ -332,6 +332,16 @@ def build_data_plane_env(data_root: Path) -> dict[str, str]:
     }
 
 
+def build_host_env(data_root: Path, distro_root: Path, generation_id: str) -> dict[str, str]:
+    """宿主受信环境：数据面路径与 catalog 允许展开的三项变量同源。"""
+    return {
+        **build_data_plane_env(data_root),
+        "GHRAH_DATA_ROOT": str(data_root),
+        "GHRAH_DISTRO_ROOT": str(distro_root),
+        "GHRAH_GENERATION_ID": generation_id,
+    }
+
+
 def ensure_data_dirs(data_root: Path) -> None:
     """物化数据盘目录结构（库文件由 OS 自建；目录由引导器保证）。"""
     for sub in ("manifests", "projects", "workspace"):

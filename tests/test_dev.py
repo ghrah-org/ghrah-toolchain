@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -161,17 +163,26 @@ actions = ["inspect"]
     def catalog() -> dict:
         data = (ctx.gen / CATALOG_FILE).read_bytes()
         assert data == (ctx.artifacts / CATALOG_FILE).read_bytes()
+        metadata = tomllib.loads((ctx.gen / GENERATION_TOML).read_text(encoding="utf-8"))
+        assert metadata["generation"]["mode"] == "dev"
+        assert metadata["generation"]["catalog_sha256"] == hashlib.sha256(data).hexdigest()
         return json.loads(data)
 
     run_dev()
     first = catalog()
     assert first["distro"] == "generic"
     assert calls == ["full", "install"]
-    assert not (ctx.gen / GENERATION_TOML).exists()
+    assert (ctx.gen / GENERATION_TOML).exists()
 
     run_dev()
     assert calls == ["full", "install"]
     assert catalog() == first
+
+    # 已有开发代缺元数据时，只补代元数据，不重编任何 wheel。
+    (ctx.gen / GENERATION_TOML).unlink()
+    run_dev()
+    assert catalog() == first
+    assert calls == ["full", "install"]
 
     workspace.write_text(
         workspace.read_text(encoding="utf-8").replace('version = "1"', 'version = "2"'),
@@ -191,6 +202,7 @@ actions = ["inspect"]
     run_dev()
     assert not (ctx.gen / CATALOG_FILE).exists()
     assert not (ctx.artifacts / CATALOG_FILE).exists()
+    assert not (ctx.gen / GENERATION_TOML).exists()
     assert calls == ["full", "install", "incremental", "upgrade"]
 
 

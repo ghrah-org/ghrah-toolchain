@@ -47,6 +47,7 @@ from ghrah_toolchain.boot import (
     _ENV_SERVER_HOST,
     _ENV_SERVER_PORT,
     BootTarget,
+    _session_exited,
     boot_pid_path,
     os_server_command,
     resolve_boot_target,
@@ -69,18 +70,18 @@ from ghrah_toolchain.errors import BuildError, ToolchainError
 from ghrah_toolchain.layout import (
     DistroLayout,
     DistroToml,
-    build_data_plane_env,
+    build_host_env,
     ensure_data_dirs,
     resolve_data_root,
 )
 from ghrah_toolchain.lifecycle import DEFAULT_HOST, BootStack, StackConfig, port_in_use
 from ghrah_toolchain.materialize import (
     CATALOG_FILE,
+    GENERATION_TOML,
     _install_python_env,
     _uv_env,
     _venv_python,
 )
-from ghrah_toolchain.runtime_ref import _pid_alive
 from ghrah_toolchain.toml_io import atomic_write
 
 logger = logging.getLogger(__name__)
@@ -335,6 +336,35 @@ def _refresh_dev_catalog(directory: Path, catalog: str | None) -> None:
         atomic_write(path, catalog)
 
 
+def _refresh_dev_generation(gen: Path, catalog: str | None) -> None:
+    """开发代同样为宿主提供文件摘要；不伪装成不可变的发布代。"""
+    path = gen / GENERATION_TOML
+    if catalog is None:
+        path.unlink(missing_ok=True)
+        return
+    digest = hashlib.sha256(catalog.encode("utf-8")).hexdigest()
+    atomic_write(
+        path,
+        f'[generation]\nschema_version = 1\nmode = "dev"\ncatalog_sha256 = "{digest}"\n',
+    )
+
+
+def _dev_generation_current(gen: Path, catalog: str | None) -> bool:
+    path = gen / GENERATION_TOML
+    if catalog is None:
+        return not path.exists()
+    try:
+        import tomllib
+
+        expected = hashlib.sha256(catalog.encode("utf-8")).hexdigest()
+        return (
+            tomllib.loads(path.read_text(encoding="utf-8"))["generation"]["catalog_sha256"]
+            == expected
+        )
+    except OSError, ValueError, KeyError, TypeError:
+        return False
+
+
 def _build_full(src: Path, artifacts: Path, catalog: str | None) -> None:
     """全量：五包 wheels + pins + webui（tarballs + observer-web dist）→ 原子落位。"""
     tmp = artifacts.parent / f"{ARTIFACTS}.tmp-{os.getpid()}"
@@ -385,6 +415,7 @@ def _materialize_dev(distro_root: Path, artifacts: Path, gen: Path, *, python: s
         catalog = artifacts / CATALOG_FILE
         if catalog.is_file():
             shutil.copyfile(catalog, staging / CATALOG_FILE)
+            _refresh_dev_generation(staging, catalog.read_text(encoding="utf-8"))
         if gen.exists():
             _rmtree(gen)
         gen.parent.mkdir(parents=True, exist_ok=True)
@@ -406,6 +437,7 @@ def _upgrade_dev(
         _run(cmd, env=_uv_env(distro_root))
     _refresh_dev_catalog(artifacts, catalog)
     _refresh_dev_catalog(gen, catalog)
+    _refresh_dev_generation(gen, catalog)
 
 
 def _smoke(gen: Path) -> None:
@@ -439,7 +471,7 @@ def _kill_tree(pid: int) -> None:
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGTERM)
         for _ in range(25):  # ~5s 宽限后强杀
-            if _pid_alive(pid) is False:
+            if _session_exited(pid):
                 return
             time.sleep(0.2)
         with contextlib.suppress(ProcessLookupError):
@@ -459,13 +491,16 @@ def _stop_dev_session(ctx: DevContext) -> bool:
         pid = int(pidfile.read_text(encoding="utf-8").strip() or "0")
     except OSError, ValueError:
         pid = 0
-    if pid and _pid_alive(pid) is True:
+    if pid and not _session_exited(pid):
         print(f"[dev] 正在停止之前的开发服务（进程编号: {pid}） …", flush=True)
-        _kill_tree(pid)
+        if os.name == "nt":
+            atomic_write(ctx.dev_root / "stop-request", str(pid))
+        else:
+            _kill_tree(pid)
         deadline = time.monotonic() + 15.0
-        while _pid_alive(pid) is not False and time.monotonic() < deadline:
+        while not _session_exited(pid) and time.monotonic() < deadline:
             time.sleep(0.2)
-        if _pid_alive(pid) is not False:
+        if not _session_exited(pid):
             raise ToolchainError(
                 f"无法停止开发服务（进程编号: {pid}）；请手动结束该进程后重试"
                 f"（进程记录文件: {pidfile}）"
@@ -489,7 +524,7 @@ def _read_dev_pid(ctx: DevContext) -> int:
 def _dev_session_alive(ctx: DevContext) -> bool:
     """dev 会话是否确在运行（读 .dev/dev.pid + 存活探测）。"""
     pid = _read_dev_pid(ctx)
-    return pid != 0 and _pid_alive(pid) is True
+    return pid != 0 and not _session_exited(pid)
 
 
 def _print_access_hint(ctx: DevContext, pid: int | None = None) -> None:
@@ -573,10 +608,13 @@ async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
         open_browser=open_browser,
     )
     os_env = {
-        **build_data_plane_env(data_root),
+        **build_host_env(data_root, ctx.distro_root, ".dev/gen"),
         _ENV_SERVER_HOST: config.host,
         _ENV_SERVER_PORT: str(sport),
     }
+    if ctx.toml.environment.keys() & os_env.keys():
+        raise ToolchainError("runtime.env 与工具链管理的数据路径或端口配置冲突")
+    os_env.update(ctx.toml.environment)
     webui_root = _dev_webui_root(ctx)
     stack = BootStack(
         config,
@@ -587,14 +625,22 @@ async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
         webui_ws_url=config.subject_ws_url(),
     )
     stop = asyncio.Event()
+    request = ctx.dev_root / "stop-request"
     loop = asyncio.get_running_loop()
     installed: list[signal.Signals] = []
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    fallback_handlers = {}
+    signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        signals.append(signal.SIGBREAK)
+    for sig in signals:
         try:
             loop.add_signal_handler(sig, stop.set)
             installed.append(sig)
         except NotImplementedError, RuntimeError, ValueError:
-            logger.debug("signal handler unavailable: %s", sig)
+            try:
+                fallback_handlers[sig] = signal.signal(sig, lambda *_: stop.set())
+            except ValueError, OSError:
+                logger.debug("signal handler unavailable: %s", sig)
     pidfile = ctx.dev_root / DEV_PID
     pidfile.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -623,7 +669,9 @@ async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
             flush=True,
         )
         while True:
-            if stop.is_set():
+            if stop.is_set() or (
+                request.is_file() and request.read_text(encoding="utf-8") == str(os.getpid())
+            ):
                 logger.info("收到停止请求，先停止前端，再停止后端")
                 return 0
             proc = stack.os_process
@@ -639,8 +687,12 @@ async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
                 loop.remove_signal_handler(sig)
             except NotImplementedError, RuntimeError, ValueError:
                 logger.debug("signal handler removal failed: %s", sig)
+        for sig, handler in fallback_handlers.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, handler)
         with contextlib.suppress(OSError):
             pidfile.unlink()
+            request.unlink(missing_ok=True)
         await asyncio.shield(stack.stop())
 
 
@@ -692,7 +744,9 @@ def dev_run(
     gen = ctx.gen
     artifacts = ctx.artifacts
     catalog = _dev_catalog(ctx.repo)
-    catalog_changed = not all(_catalog_current(path, catalog) for path in (artifacts, gen))
+    catalog_changed = not all(
+        _catalog_current(path, catalog) for path in (artifacts, gen)
+    ) or not _dev_generation_current(gen, catalog)
 
     deps_changed = state is not None and state.get("units", {}).get("deps") != fp["deps"]
     py_changed = [

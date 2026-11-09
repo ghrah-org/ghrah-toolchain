@@ -39,6 +39,7 @@ from ghrah_toolchain.layout import (
     DistroLayout,
     DistroToml,
     build_data_plane_env,
+    build_host_env,
     ensure_data_dirs,
     ghrah_root,
     resolve_data_root,
@@ -348,7 +349,7 @@ async def run_boot(
         open_browser=not no_browser and not no_webui,
     )
     os_env = {
-        **build_data_plane_env(data_root),
+        **build_host_env(data_root, target.layout.root, target.version),
         _ENV_SERVER_HOST: config.host,
         _ENV_SERVER_PORT: str(sport),
     }
@@ -381,7 +382,10 @@ async def run_boot(
     stop = stop_event or asyncio.Event()
     loop = asyncio.get_running_loop()
     installed: list[signal.Signals] = []
+    fallback_handlers = {}
     signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        signals.append(signal.SIGBREAK)
     if hasattr(signal, "SIGHUP"):
         signals.append(signal.SIGHUP)
     for sig in signals:
@@ -389,7 +393,10 @@ async def run_boot(
             loop.add_signal_handler(sig, stop.set)
             installed.append(sig)
         except NotImplementedError, RuntimeError, ValueError:
-            logger.debug("signal handler unavailable: %s", sig)
+            try:
+                fallback_handlers[sig] = signal.signal(sig, lambda *_: stop.set())
+            except ValueError, OSError:
+                logger.debug("signal handler unavailable: %s", sig)
     _write_boot_pid(target.layout.root)
     try:
         starting = asyncio.create_task(stack.start())
@@ -433,6 +440,9 @@ async def run_boot(
                 loop.remove_signal_handler(sig)
             except NotImplementedError, RuntimeError, ValueError:
                 logger.debug("signal handler removal failed: %s", sig)
+        for sig, handler in fallback_handlers.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, handler)
         try:
             await asyncio.shield(stack.stop())
         finally:
