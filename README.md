@@ -122,7 +122,7 @@ ghrah distro default generic
 
 `status` 分开显示安装代、监督进程状态和配置地址，不会因读取状态而 fetch、构建或启动；`running` 表示启动健康检查曾通过，当前健康不会被自动重新探测。`default` 显式选择默认已安装实例，省略名称时使用该设置，不读取源码清单的 default_distro。
 
-每次后台启动创建独立日志，位于 <安装域>/<实例>/logs/；Subject 输出和监督者错误均写入其中。当前尚未自动轮转日志。正常 stop 会收束子进程后再报告停止；POSIX 支持启动中取消和 SIGHUP 收束。监督者被 SIGKILL 等不可捕获方式杀死时的内核级子进程兜底尚未实现，Windows 分支尚未真机验收。
+每次后台启动创建独立日志，位于 <安装域>/<实例>/logs/；Subject 输出和监督者错误均写入其中。当前尚未自动轮转日志。正常 stop 会收束子进程后再报告停止；POSIX 支持启动中取消和 SIGHUP 收束。监督者被 SIGKILL 等不可捕获方式杀死时的内核级子进程兜底尚未实现。Windows 上的后台启动／状态／停止已真机验收：venv 与 console-script 入口会多一层启动器，因此实例记录里的 pid 以监督进程自注册为准（见 `ghrah_toolchain.instances._claim_record`），而不是 `Popen` 返回的启动器 pid。
 
 ```sh
 ghrah distro logs generic --follow

@@ -201,8 +201,12 @@ def start_instance(
                 command.append("--no-webui")
             options: dict[str, Any] = {}
             if os.name == "nt":
+                # 用不可见的独立控制台替代 DETACHED_PROCESS：后者在 Win10+ 会为
+                # 脱离的 console 进程拉起 ConPTY（conhost 的 PseudoConsoleWindow），
+                # 桌面上表现为一个空的命令框。CREATE_NO_WINDOW 同样让监督者脱离
+                # 当前终端，但不显示窗口。
                 options["creationflags"] = (
-                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
                 )
             else:
                 options["start_new_session"] = True
@@ -240,13 +244,33 @@ def start_instance(
     return instance_status(name)
 
 
+def _claim_record(root: Path, token: str, *, pid: int | None = None) -> dict[str, Any]:
+    """把实例记录归属到真正运行监督逻辑的进程（调用者须持实例锁）。
+
+    POSIX 上 ``Popen`` 的 pid 就是监督进程本身，记录无需改写；Windows 上
+    ``venv\\Scripts\\python.exe`` 是 ``venvlauncher``、console-script 入口是
+    trampoline，``Popen`` 拿到的是启动器 pid，真正执行本模块的是它的子进程。
+    父进程无法预知那个 pid，因此改由持 token 的监督进程自注册：此后
+    status／stop／日志归属跟踪的才是拥有实例生命周期的进程。
+
+    ``pid`` 仅供调用方指明归属进程（测试注入）；缺省为当前进程。
+    """
+    record = _read(root)
+    if record is None or record["token"] != token:
+        raise ToolchainError("后台管理进程与实例记录不匹配")
+    owner = psutil.Process(pid)
+    if record["pid"] != owner.pid:
+        record["pid"] = owner.pid
+        record["created"] = owner.create_time()
+        _write(root, record)
+    return record
+
+
 def serve_instance(name: str, token: str, *, no_webui: bool = False) -> int:
     """后台监督入口：将就绪、退出或失败写回该会话，并收束全部子进程。"""
     root = resolve_distro_root(name)
     with _locked(root):
-        record = _read(root)
-        if record is None or record["token"] != token or record["pid"] != os.getpid():
-            raise ToolchainError("后台管理进程与实例记录不匹配")
+        record = _claim_record(root, token)
     logging.getLogger().setLevel(logging.INFO)
 
     def ready() -> None:
