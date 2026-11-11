@@ -1,0 +1,33 @@
+# ghrah 容器部署（当前形态）：单容器 + host 网络（工具链前台进程 = 容器主进程）。
+# 用法见 README；host 网络下容器直接监听宿主回环的 4112/5173。
+name: ghrah
+
+services:
+  ghrah:
+    image: ghrah-runtime:0.2.0
+    # 默认后端 4112 / 前端 5173（host 网络下直接监听宿主回环）。
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 40s
+    volumes:
+      - ghrah-data:/opt/ghrah-home/generic/data
+      - ghrah-logs:/opt/ghrah-home/generic/logs
+      - ghrah-ability:/opt/ghrah-home/generic/ability
+      - ./secrets/agentconf:/home/ghrah/.agentconf
+    healthcheck:
+      # 后端 /health 只代表 uvicorn 在服务（宿主入口组合入后才有 503/200 门控）
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4112/health', timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  ghrah-data:
+  ghrah-logs:
+  ghrah-ability:

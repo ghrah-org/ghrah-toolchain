@@ -12,3 +12,6 @@ pytest-of-*/
 *.egg-info/
 build/
 dist/
+
+# 容器部署的模型配置（含明文 API key，禁止入库）
+deploy/secrets/
