@@ -251,11 +251,11 @@ ghrah dev reset             # 清空 .dev（含产物），下次必然全量
 
 浏览器默认自动打开同 `start`；要关掉用 `--no-browser`。Subject 与前端子进程的输出直接继承当前终端（含 uvicorn 的就绪行与请求日志），监督侧的 INFO 记录另写入 `.dev/dev.log`。
 
-增量维度是「包」：五个 Python wheel 各算一个指纹单元，依赖闭包（`pyproject.toml`／`uv.lock`／`pnpm-lock.yaml`／`pnpm-workspace.yaml`）与 webui 各算一个。只改某个 Python 包时仅重编该 wheel 并强制重装进 dev venv；依赖或 webui 变动走全量重建。首次必然全量（含 pnpm 打包，约几分钟）。
+增量维度是「包」：每个 Python 包（当前 `ghrah-kernel`／`ghrah-core`／`ghrah-protocol`／`ghrah-plugin`／`ghrah-taskstore`／`ghrah-subject` 六包）的 wheel 各算一个指纹单元，依赖闭包（`.python-version`／`pyproject.toml`／`uv.lock`／`pnpm-lock.yaml`／`pnpm-workspace.yaml`）与 webui 各算一个。只改某个 Python 包时仅重编该 wheel 并强制重装进 dev venv；依赖或 webui 变动走全量重建（解释器版本变化也算依赖变动）。首次必然全量（含 pnpm 打包，约几分钟）。
 
 dev 与发布态共用端口：起服前若存在 boot 会话会先停止它，同一时间只运行一个形态。dev 专用 venv 位于 `.dev/gen/env/.venv`，指纹基线在 `.dev/state.json`，会话 pid 在 `.dev/dev.pid`（与旧 `ghrah-bootloader` 的 dev 同路径、同格式，可直接互相接管）。
 
-代内 Python 钉 monorepo `requires-python` 的下限版本（当前 3.11），而不是工具链自身解释器：运行时闭包里的 C 扩展（httptools 等）在最新 CPython 上常无预编译 wheel，会退化成源码编译（Windows 需 MSVC）。工具链自身的 Python 版本与代内环境仍然各管各的。
+代内 Python 按**被构建源码的** `.python-version` 选解释器（`build` 把它写进产物 `manifest.json`，安装按产物选；`dev` 直接读源码），与工具链自身解释器各管各的。源码没有版本声明时才回退旧式 3.11 基线。不要用工具链解释器或旧基线去装新源码的 wheel：源码基线已抬到 3.15.1，用 3.11 建环境会因 `Requires-Python` 不满足而解不出依赖。
 
 调试时把 `-v`／`--verbose` 放在子命令之前（`ghrah -v dev run`）。Windows 上运行中的 Python 持有 `.pyd`／`.pyc` 文件锁，因此「停旧 → 装 → 起新」的顺序不可颠倒；构建阶段可以让旧服继续跑。
 

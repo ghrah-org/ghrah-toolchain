@@ -52,11 +52,12 @@ LEGACY_ENTRY_POINT = "ghrah-subject-server"
 _CACHE_SUBDIR_UV = "cache/uv"
 _CACHE_SUBDIR_PNPM = "cache/pnpm-store"
 
-# 代内 Python 钉死为「运行时下限版本」，而不是 toolchain 自身解释器。
-# 运行时闭包里的 C 扩展（httptools 等）在最新 CPython 上常无预编译 wheel，
-# 会退化成源码编译（Windows 需 MSVC Build Tools——实测 3.15 直接失败）；
-# 下限版本 wheel 覆盖最好，且与 monorepo `requires-python = ">=3.11"` 对齐。
-# 调高此值前先确认 pins.txt 里每个 C 扩展都有该版本的 wheel。
+# 代内 Python 的**权威来源**是构建产物：`build` 把源码 `.python-version` 的数字
+# 版本写进 manifest.json 的 `python.interpreter`，安装/物化按它选解释器；dev 则
+# 直接读被构建源码的 `.python-version`。本常量只是**旧式来源／旧产物的回退基线**
+# （没有版本声明的历史 ghrah 构建链，其运行时要求曾为 3.11）——不要用它决定新
+# 构建的解释器：源码基线已抬到 3.15.1，3.11 装不下这些 wheel。
+# 调高回退值时先确认 pins.txt 里每个 C 扩展都有该版本的 wheel。
 RUNTIME_PYTHON = "3.11"
 
 
@@ -449,8 +450,9 @@ def _install_python_env(
     shebang 会钉死 staging 名（改名后入口全部失效）；relocatable 形态的入口
     脚本为自定位 wrapper（``#!/bin/sh`` + 相对解析），改名后照常执行。
 
-    ``python`` 显式指定解释器时优先使用；dev 的产物树没有 manifest.json，
-    由调用者直接传入 ``RUNTIME_PYTHON``。
+    ``python`` 显式指定解释器时优先使用（dev 的产物树没有 manifest.json，由调用者
+    传入被构建源码 ``.python-version`` 的数字版本）；未指定时读基座 manifest 里
+    记录的 ``python.interpreter``，只有旧式产物才回退 ``RUNTIME_PYTHON``。
     """
     wheels = sorted((base_tree / "wheels").glob("*.whl"))
     if not wheels:

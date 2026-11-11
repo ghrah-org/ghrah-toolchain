@@ -13,7 +13,7 @@
 
 - 构建源 = **工作树**（``git ls-files`` 取 tracked + untracked 非忽略文件），
   无需先 ``git commit``。
-- 增量维度 = **包**（五包 wheel 各算一个指纹单元；依赖闭包 + webui 各自成单元）。
+- 增量维度 = **包**（各 Python 包 wheel 各算一个指纹单元；依赖闭包 + webui 各自成单元）。
 - 组合代 = ``.dev/gen``（持久、可原地升级）：Python 单包改动只重编该 wheel 后
   ``uv pip install --force-reinstall --no-deps`` 覆盖进 dev venv；依赖闭包或
   webui 改动走全量重建并整体重物化。
@@ -366,7 +366,7 @@ def _dev_generation_current(gen: Path, catalog: str | None) -> bool:
 
 
 def _build_full(src: Path, artifacts: Path, catalog: str | None) -> None:
-    """全量：五包 wheels + pins + webui（tarballs + observer-web dist）→ 原子落位。"""
+    """全量：各 Python 包 wheels + pins + webui（tarballs + observer-web dist）→ 原子落位。"""
     tmp = artifacts.parent / f"{ARTIFACTS}.tmp-{os.getpid()}"
     _rmtree(tmp) if tmp.exists() else None
     try:
@@ -787,8 +787,15 @@ def dev_run(
             _stop_dev_session(ctx)
 
             if do_full:
-                print("[dev] 创建开发用 Python 环境并安装全部依赖 …", flush=True)
-                _materialize_dev(ctx.distro_root, artifacts, gen, python=_source_python(src))
+                # 解释器取自被构建源码的 .python-version，而不是工具链自身版本或
+                # 旧式 3.11 基线：源码要求更高版本时，装出来的是能装下这些 wheel 的环境。
+                python = _source_python(src)
+                print(
+                    f"[dev] 创建开发用 Python 环境并安装全部依赖（解释器 {python}，取自源码 "
+                    ".python-version）…",
+                    flush=True,
+                )
+                _materialize_dev(ctx.distro_root, artifacts, gen, python=python)
             else:
                 print("[dev] 更新开发环境与代内目录 …", flush=True)
                 _upgrade_dev(ctx.distro_root, artifacts, gen, py_changed, catalog)

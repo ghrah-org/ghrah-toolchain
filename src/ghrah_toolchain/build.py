@@ -8,7 +8,7 @@
 
 ```
 git archive <commit> → <staging>/src/          # 钉死 commit，零 worktree 元数据
-  ├── Python 五包逐包 uv build --wheel → <staging>/wheels/
+  ├── 各 Python 包逐包 uv build --wheel → <staging>/wheels/
   ├── uv export --frozen（第三方 pin 集）→ <staging>/wheels/pins.txt
   ├── pnpm（workspace 根 = 源仓根）install --frozen-lockfile
   │   → 逐包 --filter build（按依赖序）→ pack 三包 → <staging>/tarballs/
@@ -315,7 +315,7 @@ def _archive_source(repo: Path, sha: str, staging: Path) -> Path:
 
 
 def _build_wheels(src: Path, wheels_dir: Path) -> list[Path]:
-    """五包逐包 ``uv build --wheel``（根 pyproject 是 legacy backend，整仓构建失败）。"""
+    """逐包 ``uv build --wheel``（根 pyproject 是 legacy backend，整仓构建失败）。"""
     wheels_dir.mkdir(parents=True)
     for pkg in PYTHON_PACKAGES:
         pkg_dir = src / pkg
@@ -340,7 +340,7 @@ def _build_wheels(src: Path, wheels_dir: Path) -> list[Path]:
 def _export_pins(src: Path, wheels_dir: Path) -> Path:
     """``uv export --frozen`` → ``wheels/pins.txt``（仅第三方闭包；安装期零解析）。
 
-    ``--no-emit-project/--no-emit-workspace`` 排除根项目与五包自身（它们来自
+    ``--no-emit-project/--no-emit-workspace`` 排除根项目与各包自身（它们来自
     wheels）；``--no-dev`` 排除开发组——pin 集是运行时闭包。
     """
     pins = wheels_dir / "pins.txt"
