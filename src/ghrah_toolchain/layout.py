@@ -37,6 +37,12 @@ ENV_TASKSTORE_DB = "GHRAH_SUBJECT_TASKSTORE_DB"
 ENV_MANIFEST_ROOT = "GHRAH_SUBJECT_MANIFEST_ROOT"
 ENV_PROJECT_ROOT_TEMPLATE = "GHRAH_SUBJECT_PROJECT_DEFAULT_ROOT_LOCATOR_TEMPLATE"
 ENV_WORKSPACE_ROOT = "GHRAH_SUBJECT_WORKSPACE_ROOT"
+ENV_ABILITY_INSTALL_ROOT = "GHRAH_SUBJECT_ABILITY_INSTALL_ROOT"
+"""能力安装根的 env 键：默认指向发行版级 ``<distro>/ability``。
+
+工具链在启动子进程时注入默认值（见 ``boot.build_subject_env``）；
+``distro.toml`` 的 ``[runtime.env]`` 可显式覆盖（多发行版共享一份存储根）。
+"""
 
 
 def ghrah_root() -> Path:
@@ -346,6 +352,34 @@ def ensure_data_dirs(data_root: Path) -> None:
     """物化数据盘目录结构（库文件由 OS 自建；目录由引导器保证）。"""
     for sub in ("manifests", "projects", "workspace"):
         (data_root / sub).mkdir(parents=True, exist_ok=True)
+
+
+def ensure_ability_dir(layout: DistroLayout) -> Path:
+    """物化发行版级能力安装根（``<distro>/ability``），幂等。
+
+    首装与每次启动都调用：新发行版的实例没有该目录时先建出来。安装器自己会
+    建版本目录，但"根不存在"会让运维与观察端难以判断是"没装"还是"没配根"。
+
+    Args:
+        layout: 目标发行版的磁盘布局。
+
+    Returns:
+        能力安装根路径（已存在）。
+    """
+    layout.ability.mkdir(parents=True, exist_ok=True)
+    return layout.ability
+
+
+def build_ability_env(layout: DistroLayout) -> dict[str, str]:
+    """能力安装根的默认 env：指向发行版级唯一存储根。
+
+    Args:
+        layout: 目标发行版的磁盘布局。
+
+    Returns:
+        单键 env：``GHRAH_SUBJECT_ABILITY_INSTALL_ROOT`` → ``<distro>/ability``。
+    """
+    return {ENV_ABILITY_INSTALL_ROOT: str(layout.ability)}
 
 
 def snapshots_dir(layout: DistroLayout, distro_toml: DistroToml) -> Path:

@@ -23,13 +23,20 @@ import pytest
 
 from ghrah_toolchain.boot import (
     build_data_plane_env,
+    build_subject_env,
     ensure_data_dirs,
     os_server_command,
     resolve_boot_target,
     resolve_data_root,
     run_boot,
 )
-from ghrah_toolchain.layout import BootToml, DistroLayout, DistroToml
+from ghrah_toolchain.layout import (
+    ENV_ABILITY_INSTALL_ROOT,
+    BootToml,
+    DistroLayout,
+    DistroToml,
+    ensure_ability_dir,
+)
 
 
 def _make_gen(
@@ -104,6 +111,50 @@ def test_ensure_data_dirs_creates_structure(tmp_path: Path) -> None:
     ensure_data_dirs(tmp_path)
     for sub in ("manifests", "projects", "workspace"):
         assert (tmp_path / sub).is_dir()
+
+
+def test_ensure_ability_dir_creates_distro_store(tmp_path: Path) -> None:
+    """首装/启动都要物化 <distro>/ability；重复调用幂等。"""
+    layout = DistroLayout(root=tmp_path / "generic")
+    target = ensure_ability_dir(layout)
+    assert target == layout.ability == tmp_path / "generic" / "ability"
+    assert target.is_dir()
+    ensure_ability_dir(layout)
+
+
+def _subject_env(tmp_path: Path, user_env: dict[str, str] | None = None) -> dict[str, str]:
+    layout = DistroLayout(root=tmp_path / "generic")
+    return build_subject_env(
+        layout=layout,
+        data_root=tmp_path / "generic" / "data",
+        generation_id="2026.09",
+        host="127.0.0.1",
+        port=4112,
+        user_env=user_env or {},
+    )
+
+
+def test_build_subject_env_injects_ability_install_root(tmp_path: Path) -> None:
+    """能力安装根由工具链注入，不靠运维手写 [runtime.env]。"""
+    env = _subject_env(tmp_path)
+    assert env[ENV_ABILITY_INSTALL_ROOT] == str(tmp_path / "generic" / "ability")
+    assert env["GHRAH_SUBJECT_SERVER_PORT"] == "4112"
+    assert env["GHRAH_SUBJECT_SERVER_HOST"] == "127.0.0.1"
+
+
+def test_build_subject_env_allows_ability_root_override(tmp_path: Path) -> None:
+    """多发行版共享一份存储根是合法部署：runtime.env 覆盖默认值。"""
+    shared = str(tmp_path / "shared-ability")
+    env = _subject_env(tmp_path, {ENV_ABILITY_INSTALL_ROOT: shared})
+    assert env[ENV_ABILITY_INSTALL_ROOT] == shared
+
+
+def test_build_subject_env_rejects_managed_path_override(tmp_path: Path) -> None:
+    """数据面路径与端口仍不允许被 runtime.env 覆盖。"""
+    from ghrah_toolchain.errors import ToolchainError
+
+    with pytest.raises(ToolchainError, match="runtime.env"):
+        _subject_env(tmp_path, {"GHRAH_SUBJECT_DB_PATH": "/tmp/another.db"})
 
 
 def test_resolve_data_root_override(tmp_path: Path) -> None:
@@ -281,10 +332,12 @@ async def test_run_boot_env_injection_and_supervision(
     assert os_env["GHRAH_DATA_ROOT"] == str(data_root)
     assert os_env["GHRAH_DISTRO_ROOT"] == str(layout.root)
     assert os_env["GHRAH_GENERATION_ID"] == target.version
+    assert os_env["GHRAH_SUBJECT_ABILITY_INSTALL_ROOT"] == str(layout.root / "ability")
     assert os_env["GHRAH_SUBJECT_ABILITY_SOURCE"] == "builtin"
     # 数据盘目录已物化
     for sub in ("manifests", "projects", "workspace"):
         assert (data_root / sub).is_dir()
+    assert (layout.root / "ability").is_dir()
 
 
 @pytest.mark.parametrize(
@@ -724,6 +777,7 @@ async def test_run_boot_gen_form_env_injection_and_cwd(
     assert os_env["GHRAH_DATA_ROOT"] == str(data_root)
     assert os_env["GHRAH_DISTRO_ROOT"] == str(layout.root)
     assert os_env["GHRAH_GENERATION_ID"] == target.version
+    assert os_env["GHRAH_SUBJECT_ABILITY_INSTALL_ROOT"] == str(layout.root / "ability")
 
 
 # ── webui 静态 serve / --webui-dev ───────────────────────────

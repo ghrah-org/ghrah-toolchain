@@ -11,9 +11,12 @@ from pathlib import Path
 import pytest
 
 from ghrah_toolchain.layout import (
+    ENV_ABILITY_INSTALL_ROOT,
     BootToml,
     DistroLayout,
     DistroToml,
+    build_ability_env,
+    ensure_ability_dir,
     ghrah_root,
     list_distros,
     render_distro_toml,
@@ -30,6 +33,22 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_ghrah_root_env_override(home: Path, tmp_path: Path) -> None:
     assert home == tmp_path / "ghrah-home"
+
+
+def test_ensure_ability_dir_creates_distro_store(tmp_path: Path) -> None:
+    """能力安装根是发行版级目录：首次调用建出来，重复调用幂等。"""
+    layout = DistroLayout(root=tmp_path / "generic")
+    assert ensure_ability_dir(layout) == layout.ability
+    assert layout.ability == tmp_path / "generic" / "ability"
+    assert layout.ability.is_dir()
+    ensure_ability_dir(layout)
+
+
+def test_build_ability_env_points_at_distro_store(tmp_path: Path) -> None:
+    layout = DistroLayout(root=tmp_path / "generic")
+    assert build_ability_env(layout) == {
+        ENV_ABILITY_INSTALL_ROOT: str(tmp_path / "generic" / "ability")
+    }
 
 
 def test_boot_toml_missing_returns_empty(home: Path) -> None:

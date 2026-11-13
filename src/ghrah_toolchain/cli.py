@@ -25,6 +25,7 @@ from ghrah_toolchain.layout import (
     BootToml,
     DistroLayout,
     DistroToml,
+    ensure_ability_dir,
     ghrah_root,
     list_distros,
     render_distro_toml,
@@ -193,6 +194,9 @@ def _cmd_install(args: argparse.Namespace) -> int:
         initial_config=rendered,
         fetch=(location.remote if rendered else distro_toml.ref_fetch_on_update),
     )
+    # 首装即物化发行版级能力安装根：否则新实例没有 <distro>/ability，
+    # 安装器与观察端都只能看到"根不存在"，分不清是没装还是没配。
+    ability_root = ensure_ability_dir(DistroLayout(root=distro_root))
     if args.adopt_legacy_data:
         report = adopt_legacy(
             DistroLayout(root=distro_root), DistroToml.load(distro_root), subject_port=None
@@ -215,10 +219,12 @@ def _cmd_install(args: argparse.Namespace) -> int:
                 "commit": entry.commit,
                 "state": "installed",
                 "started": False,
+                "ability_root": str(ability_root),
             }
         )
     else:
         print(f"已安装 {entry.label}（源码提交: {entry.commit}），尚未启动。")
+        print(f"能力安装根: {ability_root}")
         print(f"下一步: ghrah distro start {distro}")
     return 0
 
