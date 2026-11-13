@@ -38,8 +38,10 @@ from ghrah_toolchain.layout import (
     BootToml,
     DistroLayout,
     DistroToml,
+    build_ability_env,
     build_data_plane_env,
     build_host_env,
+    ensure_ability_dir,
     ensure_data_dirs,
     ghrah_root,
     resolve_data_root,
@@ -298,6 +300,47 @@ def _resolve_last_good_tree(layout: DistroLayout, boot: BootToml, distro: str) -
     )
 
 
+def build_subject_env(
+    *,
+    layout: DistroLayout,
+    data_root: Path,
+    generation_id: str,
+    host: str,
+    port: int,
+    user_env: dict[str, str],
+) -> dict[str, str]:
+    """组装 OS 子进程 env：数据面五项 + 端口 + 能力安装根默认值。
+
+    能力安装根的默认值在**用户 env 之前**写入：``[runtime.env]`` 覆盖它（多发行版
+    共享一份存储根是合法部署），但覆盖不了数据面路径与端口——那些由工具链管理，
+    同名冲突直接报错。
+
+    Args:
+        layout: 目标发行版的磁盘布局。
+        data_root: 数据盘根。
+        generation_id: 组合代标识（写进 ``GHRAH_GENERATION_ID``）。
+        host: 绑定主机。
+        port: subject 端口。
+        user_env: ``distro.toml`` 的 ``[runtime.env]``。
+
+    Returns:
+        可直接交给子进程的 env。
+
+    Raises:
+        ToolchainError: ``user_env`` 与工具链管理的数据面路径/端口键冲突。
+    """
+    os_env = {
+        **build_host_env(data_root, layout.root, generation_id),
+        _ENV_SERVER_HOST: host,
+        _ENV_SERVER_PORT: str(port),
+    }
+    if user_env.keys() & os_env.keys():
+        raise ToolchainError("runtime.env 与工具链管理的数据路径或端口配置冲突")
+    os_env.update(build_ability_env(layout))
+    os_env.update(user_env)
+    return os_env
+
+
 async def run_boot(
     target: BootTarget,
     *,
@@ -348,14 +391,15 @@ async def run_boot(
         webui_port=wport,
         open_browser=not no_browser and not no_webui,
     )
-    os_env = {
-        **build_host_env(data_root, target.layout.root, target.version),
-        _ENV_SERVER_HOST: config.host,
-        _ENV_SERVER_PORT: str(sport),
-    }
-    if target.distro_toml.environment.keys() & os_env.keys():
-        raise ToolchainError("runtime.env 与工具链管理的数据路径或端口配置冲突")
-    os_env.update(target.distro_toml.environment)
+    ensure_ability_dir(target.layout)
+    os_env = build_subject_env(
+        layout=target.layout,
+        data_root=data_root,
+        generation_id=target.version,
+        host=config.host,
+        port=sport,
+        user_env=target.distro_toml.environment,
+    )
     # 形态判定装配：--webui-dev 显式走开发域；否则静态 serve 基座 dist。
     webui_kwargs: dict[str, object] = {}
     if not no_webui:

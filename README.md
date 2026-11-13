@@ -136,6 +136,8 @@ ghrah distro logs generic --follow
 
 **安装位置跟随发行版**：`<安装域>/<发行版>/ability/<namespace>/<name>/<version>/`（POSIX 上即 `~/.ghrah/<发行版>/ability/...`）。同一发行版内的所有项目共享这份存储；**不同发行版之间不共享**，需要时各装一次。原先的用户级 `~/.ghrah/ability/` 方案已作废：新命令不读取、不迁移该目录，只在检测到时提示"未使用"；`~/.ghrah` 顶层的 `ability` 也因此保留，不能再用作发行版名。
 
+该安装根由工具链负责闭环：首装即创建 `<发行版>/ability`，启动/重启时把 `GHRAH_SUBJECT_ABILITY_INSTALL_ROOT` 指向它。**装完只需重启实例**，不必手工配置环境变量；只有要多发行版共享一份存储根时，才在 `[runtime.env]` 里覆盖该项。
+
 ```sh
 # 作者侧：生成索引并校验（不落安装，使用作者环境）
 ghrah ability build ./my-ability --check
@@ -184,10 +186,9 @@ full／data 门禁仍未实现，选择它们会在构建前失败。数据快�
 ```toml
 [runtime.env]
 GHRAH_SUBJECT_ABILITY_SOURCE = "builtin"
-GHRAH_SUBJECT_ABILITY_INSTALL_ROOT = "/home/example/.ghrah/generic/ability"
 ```
 
-该表接受 `GHRAH_SUBJECT_` 前缀变量。数据路径、主机和端口由工具链的现有配置管理，同名冲突会报错。编辑配置后重新启动实例即可应用。
+该表接受 `GHRAH_SUBJECT_` 前缀变量。数据路径、主机和端口由工具链的现有配置管理，同名冲突会报错。能力安装根（`GHRAH_SUBJECT_ABILITY_INSTALL_ROOT`）默认由工具链按实例注入，无需手写；只有要多实例共享一份存储根时才在此覆盖。编辑配置后重新启动实例即可应用。
 
 ```sh
 ghrah distro config show generic

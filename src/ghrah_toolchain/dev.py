@@ -44,11 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ghrah_toolchain.boot import (
-    _ENV_SERVER_HOST,
-    _ENV_SERVER_PORT,
     BootTarget,
     _session_exited,
     boot_pid_path,
+    build_subject_env,
     os_server_command,
     resolve_boot_target,
     stop_boot_session,
@@ -70,7 +69,7 @@ from ghrah_toolchain.errors import BuildError, ToolchainError
 from ghrah_toolchain.layout import (
     DistroLayout,
     DistroToml,
-    build_host_env,
+    ensure_ability_dir,
     ensure_data_dirs,
     resolve_data_root,
 )
@@ -607,14 +606,15 @@ async def _serve_dev(ctx: DevContext, *, open_browser: bool) -> int:
         webui_port=wport,
         open_browser=open_browser,
     )
-    os_env = {
-        **build_host_env(data_root, ctx.distro_root, ".dev/gen"),
-        _ENV_SERVER_HOST: config.host,
-        _ENV_SERVER_PORT: str(sport),
-    }
-    if ctx.toml.environment.keys() & os_env.keys():
-        raise ToolchainError("runtime.env 与工具链管理的数据路径或端口配置冲突")
-    os_env.update(ctx.toml.environment)
+    ensure_ability_dir(ctx.layout)
+    os_env = build_subject_env(
+        layout=ctx.layout,
+        data_root=data_root,
+        generation_id=".dev/gen",
+        host=config.host,
+        port=sport,
+        user_env=ctx.toml.environment,
+    )
     webui_root = _dev_webui_root(ctx)
     stack = BootStack(
         config,
